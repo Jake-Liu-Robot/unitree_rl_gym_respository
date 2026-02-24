@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.egg-info/
+*.so
+logs/
+.idea/
+IsaacGym_Preview_4_Package/
