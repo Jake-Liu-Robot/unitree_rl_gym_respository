@@ -16,8 +16,10 @@ from legged_gym import LEGGED_GYM_ROOT_DIR
 from legged_gym.envs.base.base_task import BaseTask
 from legged_gym.utils.math import wrap_to_pi
 from legged_gym.utils.isaacgym_utils import get_euler_xyz as get_euler_xyz_in_tensor
+from legged_gym.utils.terrain import Terrain
 from legged_gym.utils.helpers import class_to_dict
 from .legged_robot_config import LeggedRobotCfg
+
 
 # 该脚本中定义了LeggedRobot类，该类继承于BaseTask类。实现与issac gym的交互，奖励函数定义。
 class LeggedRobot(BaseTask):
@@ -241,20 +243,7 @@ class LeggedRobot(BaseTask):
         self.up_axis_idx = 2  # 2 for z, 1 for y -> adapt gravity accordingly
         self.sim = self.gym.create_sim(self.sim_device_id, self.graphics_device_id, self.physics_engine,
                                        self.sim_params)
-        mesh_type = self.cfg.terrain.mesh_type
-        ## 创建地形的网格类型
-        if mesh_type in ['heightfield', 'trimesh']:
-            ## 构建Terrain类，调用第4节utils/terrain.py中的函数
-            self.terrain = Terrain(self.cfg.terrain, self.num_envs)
-        ## 以下三个函数均在legged_robot.py中定义
-        if mesh_type == 'plane':
-            self._create_ground_plane()
-        elif mesh_type == 'heightfield':
-            self._create_heightfield()
-        elif mesh_type == 'trimesh':
-            self._create_trimesh()
-        elif mesh_type is not None:
-            raise ValueError("Terrain mesh type not recognised. Allowed types are [None, plane, heightfield, trimesh]")
+        self._create_ground_plane()
         self._create_envs()
 
     def set_camera(self, position, lookat):
@@ -568,6 +557,8 @@ class LeggedRobot(BaseTask):
         ## 张量顺序[x, y, z, qx, qy, qz, qw, vx, vy, vz, wx, wy, wz]
         ## 所以该代码是取出第四个到第七个量，即反映仿真环境中全部机器人姿态的四元数组成base_quat张量
         self.base_quat = self.root_states[:, 3:7]
+        self.rpy = get_euler_xyz_in_tensor(self.base_quat)
+        self.base_pos = self.root_states[:self.num_envs, 0:3]
         ## 将接触力的张量进行重新整形，主要说一下这里的-1参数，表明新张量的第二维度的大小会根据机器人不同自动计算
         ## 这是因为不同机器人的结构不同，比如有的有4部分、头、身、腿、足，有的则分为头、身、大腿、小腿、足部等
         ## 参数3则代表有三个方向的力，是三维张量
@@ -609,10 +600,6 @@ class LeggedRobot(BaseTask):
         self.base_lin_vel = quat_rotate_inverse(self.base_quat, self.root_states[:, 7:10])
         self.base_ang_vel = quat_rotate_inverse(self.base_quat, self.root_states[:, 10:13])
         self.projected_gravity = quat_rotate_inverse(self.base_quat, self.gravity_vec)
-        if self.cfg.terrain.measure_heights:
-            ## 参考_init_height_points函数
-            self.height_points = self._init_height_points()
-        self.measured_heights = 0
 
         # joint positions offsets and PD gains
         ## 关节位置偏移量和PD权重
@@ -676,6 +663,7 @@ class LeggedRobot(BaseTask):
         plane_params.dynamic_friction = self.cfg.terrain.dynamic_friction
         plane_params.restitution = self.cfg.terrain.restitution
         self.gym.add_ground(self.sim, plane_params)
+
 
     # 该函数的主要功能是加载URDF文件，创建训练环境，为机器人增加物理属性，增加机器人自由度和形状属性等
     def _create_envs(self):
