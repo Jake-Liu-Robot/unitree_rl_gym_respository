@@ -1,4 +1,3 @@
-
 import sys
 from isaacgym import gymapi
 from isaacgym import gymutil
@@ -9,8 +8,10 @@ import torch
 class BaseTask():
 
     def __init__(self, cfg, sim_params, physics_engine, sim_device, headless):
+        ## 返回一个 gymapi.Gym 对象，用于访问isaac gym的所有功能。
         self.gym = gymapi.acquire_gym()
 
+        ## 仿真参数的赋值
         self.sim_params = sim_params
         self.physics_engine = physics_engine
         self.sim_device = sim_device
@@ -18,16 +19,19 @@ class BaseTask():
         self.headless = headless
 
         # env device is GPU only if sim is on GPU and use_gpu_pipeline=True, otherwise returned tensors are copied to CPU by physX.
+        ## 强化学习的设备
         if sim_device_type=='cuda' and sim_params.use_gpu_pipeline:
             self.device = self.sim_device
         else:
             self.device = 'cpu'
 
         # graphics device for rendering, -1 for no rendering
+        ## 是否实时可视化渲染
         self.graphics_device_id = self.sim_device_id
         if self.headless == True:
             self.graphics_device_id = -1
 
+        ## 初始化参数赋值
         self.num_envs = cfg.env.num_envs
         self.num_obs = cfg.env.num_observations
         self.num_privileged_obs = cfg.env.num_privileged_obs
@@ -38,6 +42,7 @@ class BaseTask():
         torch._C._jit_set_profiling_executor(False)
 
         # allocate buffers
+        # 按照训练的机器人个数初始化张量
         self.obs_buf = torch.zeros(self.num_envs, self.num_obs, device=self.device, dtype=torch.float)
         self.rew_buf = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
         self.reset_buf = torch.ones(self.num_envs, device=self.device, dtype=torch.long)
@@ -52,20 +57,25 @@ class BaseTask():
         self.extras = {}
 
         # create envs, sim and viewer
+        ## 创建环境、机器人
         self.create_sim()
         self.gym.prepare_sim(self.sim)
 
         # todo: read from config
+        ## 是否监视
         self.enable_viewer_sync = True
         self.viewer = None
 
         # if running with a viewer, set up keyboard shortcuts and camera
+        ## 如果使用查看器运行，需设置键盘快捷键和相机
         if self.headless == False:
             # subscribe to keyboard shortcuts
             self.viewer = self.gym.create_viewer(
                 self.sim, gymapi.CameraProperties())
+            ## esc退出
             self.gym.subscribe_viewer_keyboard_event(
                 self.viewer, gymapi.KEY_ESCAPE, "QUIT")
+            ## v暂停
             self.gym.subscribe_viewer_keyboard_event(
                 self.viewer, gymapi.KEY_V, "toggle_viewer_sync")
 

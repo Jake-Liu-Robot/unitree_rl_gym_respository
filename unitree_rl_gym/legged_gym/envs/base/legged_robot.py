@@ -175,37 +175,59 @@ class LeggedRobot(BaseTask):
         # send timeout info to the algorithm
         if self.cfg.env.send_timeouts:
             self.extras["time_outs"] = self.time_out_buf
-    
+
+    # 该函数在post_physics_step函数中被调用，主要功能是计算奖励函数值
     def compute_reward(self):
         """ Compute rewards
             Calls each reward function which had a non-zero scale (processed in self._prepare_reward_function())
             adds each terms to the episode sums and to the total reward
         """
+        ## 初始化总奖励值为0
         self.rew_buf[:] = 0.
+        ## 循环在_prepare_reward_function初始化的奖励函数字典
         for i in range(len(self.reward_functions)):
             name = self.reward_names[i]
+            ## 运行对应函数并乘上权重因子
             rew = self.reward_functions[i]() * self.reward_scales[name]
+            ## 之后进行加和
             self.rew_buf += rew
             self.episode_sums[name] += rew
+        ## 如果设定只增加正向奖励，则总奖励小于0则置为0
         if self.cfg.rewards.only_positive_rewards:
             self.rew_buf[:] = torch.clip(self.rew_buf[:], min=0.)
+        ## 增加终止奖励
         # add termination reward after clipping
         if "termination" in self.reward_scales:
             rew = self._reward_termination() * self.reward_scales["termination"]
             self.rew_buf += rew
             self.episode_sums["termination"] += rew
-    
+
+    # 该函数在post_physics_step函数中被调用，主要功能是计算网络观测值
     def compute_observations(self):
         """ Computes observations
         """
-        self.obs_buf = torch.cat((  self.base_lin_vel * self.obs_scales.lin_vel,
-                                    self.base_ang_vel  * self.obs_scales.ang_vel,
-                                    self.projected_gravity,
-                                    self.commands[:, :3] * self.commands_scale,
-                                    (self.dof_pos - self.default_dof_pos) * self.obs_scales.dof_pos,
-                                    self.dof_vel * self.obs_scales.dof_vel,
-                                    self.actions
-                                    ),dim=-1)
+        ## torch.cat将多个张量沿指定维度拼接在一起。
+        ## 观测量是：
+        ## base_lin_vel机器人本体坐标系下的线性速度（x，y,z）
+        ## base_ang_vel机器人本体坐标系下的角速度（w_x,w_y,w_z）
+        ## projected_gravity机器人坐标系下的重力分量（g_x, g_y, g_z）
+        ## commands机器人前三项命令，机器人坐标系x方向，y方向上的线速度，机器人z轴角速度
+        ## 各关节位置
+        ## 各关节速度
+        ## 动作(各个关节的角度，角速度，力矩，与选择的控制模式有关)
+        self.obs_buf = torch.cat((self.base_lin_vel * self.obs_scales.lin_vel,
+                                  self.base_ang_vel * self.obs_scales.ang_vel,
+                                  self.projected_gravity,
+                                  self.commands[:, :3] * self.commands_scale,
+                                  (self.dof_pos - self.default_dof_pos) * self.obs_scales.dof_pos,
+                                  self.dof_vel * self.obs_scales.dof_vel,
+                                  self.actions
+                                  ), dim=-1)
+        ## 如果不是盲走则增加对于环境的量测
+        # if self.cfg.terrain.measure_heights:
+        #     heights = torch.clip(self.root_states[:, 2].unsqueeze(1) - 0.5 - self.measured_heights, -1, 1.) * self.obs_scales.height_measurements
+        #     self.obs_buf = torch.cat((self.obs_buf, heights), dim=-1)
+        ## 给全部的观测量增加噪声
         # add perceptive inputs if not blind
         # add noise if needed
         if self.add_noise:
@@ -375,6 +397,8 @@ class LeggedRobot(BaseTask):
     #
     #     return heights.view(self.num_envs, -1) * self.terrain.cfg.vertical_scale
 
+    ## command顺序在机器人坐标系x方向，y方向上的线速度，机器人z轴角速度，期望航向角四个命令
+    ## 在命令的上下限中随机生成一个值
     def _resample_commands(self, env_ids):
         """ Randommly select commands of some environments
 
@@ -389,6 +413,7 @@ class LeggedRobot(BaseTask):
             self.commands[env_ids, 2] = torch_rand_float(self.command_ranges["ang_vel_yaw"][0], self.command_ranges["ang_vel_yaw"][1], (len(env_ids), 1), device=self.device).squeeze(1)
 
         # set small commands to zero
+        ## 在机器人坐标系x方向，y方向上的线速度命令过小则置为0，目前的比较值是0.2
         self.commands[env_ids, :2] *= (torch.norm(self.commands[env_ids, :2], dim=1) > 0.2).unsqueeze(1)
 
     # 该函数将动作action通过PD参数转化为关节扭矩
