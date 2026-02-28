@@ -35,8 +35,12 @@ import torch.nn as nn
 from torch.distributions import Normal
 from torch.nn.modules import rnn
 
+
+# 这段代码定义了一个名为 ActorCritic的类，它继承自nn.Module，是一个用于强化学习的演员-评论家模型的实现
+# 这个模型包含两个主要部分：一个用于决策的策略网络(演员）和一个用于评估动作价值的价值网络（评论家)
 class ActorCritic(nn.Module):
     is_recurrent = False
+    # 构造函数_ - init - -- 接收多个参数，包括观察空问的维度（分别为演员和评论家）、动作空问的维度、隐藏层的维度、激活函数类型以及初始噪声标淮差
     def __init__(self,  num_actor_obs,
                         num_critic_obs,
                         num_actions,
@@ -45,16 +49,20 @@ class ActorCritic(nn.Module):
                         activation='elu',
                         init_noise_std=1.0,
                         **kwargs):
+        # 构造函数首先检查是否有末预期的参数传入，并打印警告信息。然后，它调用get_activation函数来获取指定的激活函数
         if kwargs:
             print("ActorCritic.__init__ got unexpected arguments, which will be ignored: " + str([key for key in kwargs.keys()]))
         super(ActorCritic, self).__init__()
 
         activation = get_activation(activation)
 
+        # 接下来，构造函数初始化演员和评论家网络
+        # 这两个网络都是使用多层感知机MLP构建的，其中每一层都是通过nn.Linear创建的，并且在每个线性层之后应用了激活函数
         mlp_input_dim_a = num_actor_obs
         mlp_input_dim_c = num_critic_obs
 
-        # Policy
+        # 演员网络的输出维度等于动作空间的维度，而评论家网络的输出维度固定为1，表示对当前状态的价值评估
+        # Policy 演员网络
         actor_layers = []
         actor_layers.append(nn.Linear(mlp_input_dim_a, actor_hidden_dims[0]))
         actor_layers.append(activation)
@@ -66,7 +74,7 @@ class ActorCritic(nn.Module):
                 actor_layers.append(activation)
         self.actor = nn.Sequential(*actor_layers)
 
-        # Value function
+        # Value function  评论家网络
         critic_layers = []
         critic_layers.append(nn.Linear(mlp_input_dim_c, critic_hidden_dims[0]))
         critic_layers.append(activation)
@@ -81,6 +89,7 @@ class ActorCritic(nn.Module):
         print(f"Actor MLP: {self.actor}")
         print(f"Critic MLP: {self.critic}")
 
+        # 构造函数还初始化了一个用于动作输出的噪声参数self.std，并设置了一个分布self.distribution，该分布稍后将用于生成带有噪声的动作
         # Action noise
         self.std = nn.Parameter(init_noise_std * torch.ones(num_actions))
         self.distribution = None
@@ -97,10 +106,11 @@ class ActorCritic(nn.Module):
         [torch.nn.init.orthogonal_(module.weight, gain=scales[idx]) for idx, module in
          enumerate(mod for mod in sequential if isinstance(mod, nn.Linear))]
 
-
+    # reset(重置状态，当前为空实现)
     def reset(self, dones=None):
         pass
 
+    # forward（抽象方法，未实现）
     def forward(self):
         raise NotImplementedError
     
@@ -116,21 +126,26 @@ class ActorCritic(nn.Module):
     def entropy(self):
         return self.distribution.entropy().sum(dim=-1)
 
+    # update_distribution(根据当前观察更新动作分布）
     def update_distribution(self, observations):
         mean = self.actor(observations)
         self.distribution = Normal(mean, mean*0. + self.std)
 
+    # act（根据当前观察采取动作)
     def act(self, observations, **kwargs):
         self.update_distribution(observations)
         return self.distribution.sample()
-    
+
+    # get_actions_log_prob（计算动作的对数概率）
     def get_actions_log_prob(self, actions):
         return self.distribution.log_prob(actions).sum(dim=-1)
 
+    # act_inference（推断模式下的动作选择，不包含噪声）
     def act_inference(self, observations):
         actions_mean = self.actor(observations)
         return actions_mean
 
+    # evaluate（评估给定观察的价值)
     def evaluate(self, critic_observations, **kwargs):
         value = self.critic(critic_observations)
         return value
