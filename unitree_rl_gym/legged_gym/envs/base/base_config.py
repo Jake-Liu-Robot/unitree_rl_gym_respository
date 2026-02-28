@@ -2,7 +2,7 @@ import inspect
 
 class BaseConfig:
     def __init__(self) -> None:
-        """ Initializes all member classes recursively. Ignores all name starting with '__' (buit-in methods)."""
+        """ Initializes all member classes recursively. Ignores all namse starting with '__' (buit-in methods)."""
         self.init_member_classes(self)
     
     @staticmethod
@@ -15,9 +15,9 @@ class BaseConfig:
                 continue
             # get the corresponding attribute object
             var =  getattr(obj, key)
-            # check if the attribute is a class
+            # check if it the attribute is a class
             if inspect.isclass(var):
-                # instantiate the class
+                # instantate the class
                 i_var = var()
                 # set the attribute to the instance instead of the type
                 setattr(obj, key, i_var)

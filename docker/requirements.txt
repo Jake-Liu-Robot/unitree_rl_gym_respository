@@ -1,0 +1,18 @@
+# ── Core scientific / RL stack ────────────────────────────────
+numpy==1.23.5          # Isaac Gym compatible version
+scipy
+matplotlib
+tensorboard
+
+# ── Robotics / control ───────────────────────────────────────
+gym==0.26.2            # OpenAI Gym (rsl_rl dependency)
+
+# ── Utilities ────────────────────────────────────────────────
+pyyaml
+tqdm
+Pillow
+
+# ── MuJoCo extras ────────────────────────────────────────────
+dm-control>=1.0.14          # DeepMind control suite (uses MuJoCo backend)
+imageio
+imageio-ffmpeg
