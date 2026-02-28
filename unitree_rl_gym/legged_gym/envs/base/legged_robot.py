@@ -15,9 +15,15 @@ from legged_gym import LEGGED_GYM_ROOT_DIR
 from legged_gym.envs.base.base_task import BaseTask
 from legged_gym.utils.math import wrap_to_pi
 from legged_gym.utils.isaacgym_utils import get_euler_xyz as get_euler_xyz_in_tensor
+from legged_gym.utils.terrain import Terrain
 from legged_gym.utils.helpers import class_to_dict
 from .legged_robot_config import LeggedRobotCfg
 
+<<<<<<< HEAD
+=======
+
+# 该脚本中定义了LeggedRobot类，该类继承于BaseTask类。实现与issac gym的交互，奖励函数定义。
+>>>>>>> badd148d27680974095070e7c1d959ee16371c9b
 class LeggedRobot(BaseTask):
     def __init__(self, cfg: LeggedRobotCfg, sim_params, physics_engine, sim_device, headless):
         """ Parses the provided config file,
@@ -198,8 +204,15 @@ class LeggedRobot(BaseTask):
     def create_sim(self):
         """ Creates simulation, terrain and evironments
         """
+<<<<<<< HEAD
         self.up_axis_idx = 2 # 2 for z, 1 for y -> adapt gravity accordingly
         self.sim = self.gym.create_sim(self.sim_device_id, self.graphics_device_id, self.physics_engine, self.sim_params)
+=======
+        ## 确认竖直向上的轴是z轴
+        self.up_axis_idx = 2  # 2 for z, 1 for y -> adapt gravity accordingly
+        self.sim = self.gym.create_sim(self.sim_device_id, self.graphics_device_id, self.physics_engine,
+                                       self.sim_params)
+>>>>>>> badd148d27680974095070e7c1d959ee16371c9b
         self._create_ground_plane()
         self._create_envs()
 
@@ -439,7 +452,14 @@ class LeggedRobot(BaseTask):
         self.base_quat = self.root_states[:, 3:7]
         self.rpy = get_euler_xyz_in_tensor(self.base_quat)
         self.base_pos = self.root_states[:self.num_envs, 0:3]
+<<<<<<< HEAD
         self.contact_forces = gymtorch.wrap_tensor(net_contact_forces).view(self.num_envs, -1, 3) # shape: num_envs, num_bodies, xyz axis
+=======
+        ## 将接触力的张量进行重新整形，主要说一下这里的-1参数，表明新张量的第二维度的大小会根据机器人不同自动计算
+        ## 这是因为不同机器人的结构不同，比如有的有4部分、头、身、腿、足，有的则分为头、身、大腿、小腿、足部等
+        ## 参数3则代表有三个方向的力，是三维张量
+        self.contact_forces = gymtorch.wrap_tensor(net_contact_forces).view(self.num_envs, -1, 3)
+>>>>>>> badd148d27680974095070e7c1d959ee16371c9b
 
         # initialize some data used later on
         self.common_step_counter = 0
@@ -461,7 +481,10 @@ class LeggedRobot(BaseTask):
         self.base_lin_vel = quat_rotate_inverse(self.base_quat, self.root_states[:, 7:10])
         self.base_ang_vel = quat_rotate_inverse(self.base_quat, self.root_states[:, 10:13])
         self.projected_gravity = quat_rotate_inverse(self.base_quat, self.gravity_vec)
+<<<<<<< HEAD
       
+=======
+>>>>>>> badd148d27680974095070e7c1d959ee16371c9b
 
         # joint positions offsets and PD gains
         self.default_dof_pos = torch.zeros(self.num_dof, dtype=torch.float, device=self.device, requires_grad=False)
@@ -517,6 +540,11 @@ class LeggedRobot(BaseTask):
         plane_params.restitution = self.cfg.terrain.restitution
         self.gym.add_ground(self.sim, plane_params)
 
+<<<<<<< HEAD
+=======
+
+    # 该函数的主要功能是加载URDF文件，创建训练环境，为机器人增加物理属性，增加机器人自由度和形状属性等
+>>>>>>> badd148d27680974095070e7c1d959ee16371c9b
     def _create_envs(self):
         """ Creates environments:
              1. loads the robot URDF/MJCF asset,
