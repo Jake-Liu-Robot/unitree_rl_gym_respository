@@ -40,7 +40,7 @@ class TaskRegistry():
 
         Args:
             name (string): Name of a registered env.
-            args (Args, optional): Isaac Gym comand line arguments. If None get_args() will be called. Defaults to None.
+            args (Args, optional): Isaac Gym command line arguments. If None get_args() will be called. Defaults to None.
             env_cfg (Dict, optional): Environment config file used to override the registered config. Defaults to None.
 
         Raises:
