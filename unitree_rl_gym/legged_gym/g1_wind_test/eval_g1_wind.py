@@ -59,6 +59,10 @@ def evaluate_wind_level(env, policy, wind_level, num_episodes=50, max_steps=1000
     # Force all envs to the target wind level
     env.wind_curriculum_level[:] = wind_level
 
+    # Freeze curriculum: save and override the upgrade window to prevent advancement
+    saved_upgrade_window = env.cfg.wind.upgrade_window
+    env.cfg.wind.upgrade_window = 999999  # effectively disable curriculum changes
+
     # Reset all envs by forcing termination
     env.reset_buf[:] = 1
     env_ids = torch.arange(num_envs, device=device)
@@ -130,6 +134,11 @@ def evaluate_wind_level(env, policy, wind_level, num_episodes=50, max_steps=1000
                     episode_wind_forces.append(ep_wind_force[i].item() / length)
                     episodes_collected += 1
             break
+
+    # Restore curriculum window
+    env.cfg.wind.upgrade_window = saved_upgrade_window
+    # Re-freeze level for consistency (in case it drifted before freeze took effect)
+    env.wind_curriculum_level[:] = wind_level
 
     episode_lengths = np.array(episode_lengths[:num_episodes])
     episode_rewards = np.array(episode_rewards[:num_episodes])

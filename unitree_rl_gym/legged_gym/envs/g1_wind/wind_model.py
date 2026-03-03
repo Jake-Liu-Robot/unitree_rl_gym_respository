@@ -57,6 +57,11 @@ class WindModel:
         # Output: final wind force vector per env [num_envs, 3]
         self.wind_force = torch.zeros(num_envs, 3, device=device)
 
+        # Precompute curriculum levels tensor (avoid re-creating each call)
+        self.curriculum_levels_tensor = torch.tensor(
+            cfg.curriculum_levels, dtype=torch.float, device=device
+        )  # [num_levels, 2]
+
     def reset_envs(self, env_ids, curriculum_level):
         """Reset wind state for specified environments (on episode reset).
 
@@ -121,6 +126,8 @@ class WindModel:
         # --- Compute aerodynamic force ---
         # F = 0.5 * rho * Cd * A * v^2
         force_magnitude = 0.5 * self.rho * self.Cd * self.A * effective_speed ** 2
+        # Clamp to physical limit (~body weight of 35kg robot = ~350N)
+        force_magnitude = torch.clamp(force_magnitude, max=500.0)
 
         # Apply direction
         self.wind_force = self.base_direction * force_magnitude.unsqueeze(1)
@@ -166,8 +173,8 @@ class WindModel:
         Returns:
             Tensor [len(env_ids)] of sampled wind speeds
         """
-        levels = torch.tensor(self.cfg.curriculum_levels, device=self.device)  # [num_levels, 2]
-        max_level = len(self.cfg.curriculum_levels) - 1
+        levels = self.curriculum_levels_tensor  # precomputed [num_levels, 2]
+        max_level = levels.shape[0] - 1
 
         lvl = curriculum_level[env_ids].long().clamp(max=max_level)
         speed_min = levels[lvl, 0]  # [n]

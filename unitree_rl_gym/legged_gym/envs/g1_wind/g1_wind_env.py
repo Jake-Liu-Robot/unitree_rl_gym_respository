@@ -172,6 +172,12 @@ class G1WindRobot(G1Robot):
                 self.wind_curriculum_level[:] = torch.clamp(
                     self.wind_curriculum_level + 1, max=max_level
                 )
+            elif (avg_survival < self.cfg.wind.demotion_survival_threshold
+                    and avg_tracking < self.cfg.wind.demotion_tracking_threshold):
+                # Demote if performing very poorly at current level
+                self.wind_curriculum_level[:] = torch.clamp(
+                    self.wind_curriculum_level - 1, min=0
+                )
 
             # Reset window
             self.wind_reset_counter = 0
@@ -199,6 +205,7 @@ class G1WindRobot(G1Robot):
         if self.cfg.wind.enable:
             wind_vel = self.wind_model.get_wind_velocity()   # [num_envs, 3]
             wind_force = self.wind_model.wind_force           # [num_envs, 3]
+            # Normalize: wind_vel ~[0,18] m/s → /10, wind_force ~[0,500] N → /100
             self.privileged_obs_buf = torch.cat((
                 self.base_lin_vel * self.obs_scales.lin_vel,
                 self.base_ang_vel * self.obs_scales.ang_vel,
@@ -209,8 +216,8 @@ class G1WindRobot(G1Robot):
                 self.actions,
                 sin_phase,
                 cos_phase,
-                wind_vel,     # 3 dims
-                wind_force,   # 3 dims
+                wind_vel * 0.1,        # 3 dims, normalized
+                wind_force * 0.01,     # 3 dims, normalized
             ), dim=-1)
         else:
             self.privileged_obs_buf = torch.cat((
@@ -230,41 +237,30 @@ class G1WindRobot(G1Robot):
 
     # ========== Wind-specific reward functions ==========
 
-    def _reward_wind_stability(self):
-        """Penalize base velocity error under wind — encourages stable CoM.
-
-        Higher penalty when actual velocity deviates from commanded velocity,
-        which is harder under wind. Uses squared error on xy velocity.
-        """
-        vel_error = torch.sum(
-            torch.square(self.commands[:, :2] - self.base_lin_vel[:, :2]), dim=1
-        )
-        return vel_error
-
     def _reward_lean_compensation(self):
         """Reward leaning against wind force to maintain balance.
 
-        Wind force pushes robot in base_direction (+x). To resist, the robot
-        should lean AGAINST the force (toward -x, into the oncoming wind).
+        Both vectors must be in the same frame. We transform wind direction
+        from world frame to body frame so it matches projected_gravity.
 
-        projected_gravity in body frame: when robot tilts toward -x (world),
-        the body-frame gravity gets a positive x component. So leaning against
-        a +x wind force gives projected_gravity.x > 0, while wind_dir.x > 0.
-
-        But actually: wind pushes in +x, robot should lean toward the wind
-        SOURCE (i.e. -x). When leaning toward -x, projected_gravity.x becomes
-        negative. So we want dot(gravity_xy, -wind_dir_xy) > 0, i.e.
-        dot(gravity_xy, wind_dir_xy) < 0. We negate to make the reward positive
-        when the robot correctly leans against the wind.
+        In body frame: projected_gravity points opposite to the body's "up".
+        When the robot leans into the wind, the gravity vector's horizontal
+        component aligns with the wind direction (in body frame).
+        We reward negative dot product = leaning against wind.
         """
         if not self.cfg.wind.enable:
             return torch.zeros(self.num_envs, device=self.device)
 
-        gravity_xy = self.projected_gravity[:, :2]  # [num_envs, 2]
-        wind_dir_xy = self.wind_model.base_direction[:, :2]  # [num_envs, 2]
+        gravity_xy = self.projected_gravity[:, :2]  # body frame [num_envs, 2]
+
+        # Transform wind direction from world frame to body frame
+        wind_dir_body = quat_rotate_inverse(
+            self.base_quat, self.wind_model.base_direction
+        )  # [num_envs, 3]
+        wind_dir_body_xy = wind_dir_body[:, :2]  # [num_envs, 2]
 
         # Negative dot product = leaning against the wind force direction
-        lean_against_wind = -torch.sum(gravity_xy * wind_dir_xy, dim=1)
+        lean_against_wind = -torch.sum(gravity_xy * wind_dir_body_xy, dim=1)
 
         # Only reward when wind is actually blowing
         wind_active = self.wind_model.base_speed > 0.5
