@@ -102,13 +102,13 @@ base_lin_vel(3) + ang_vel(3) + gravity(3) + commands(3) + dof_pos(12) + dof_vel(
 | Base walking | orientation | -1.0 | inherited |
 | Base walking | base_height | -10.0 | inherited |
 | Energy | dof_acc / dof_vel / action_rate | -2.5e-7 / -1e-3 / -0.01 | inherited |
-| Humanoid | alive / contact / hip_pos / feet_swing_height | 0.15 / 0.18 / -1.0 / -20.0 | inherited |
-| **Wind-specific** | **wind_stability** | **-0.5** | penalize vel tracking error (squared) |
-| **Wind-specific** | **lean_compensation** | **0.2** | reward leaning against wind direction |
-| **Wind-specific** | **sustained_walking** | **0.1** | per-step survival bonus |
-| **Wind-specific** | **contact_symmetry** | **0.05** | reward symmetric L/R foot contact |
+| Humanoid | alive / contact / hip_pos / feet_swing_height | 0.5 / 0.18 / -1.0 / -20.0 | inherited (alive boosted) |
+| **Wind-specific** | **lean_compensation** | **0.3** | reward leaning against wind (body-frame corrected) |
+| ~~removed~~ | ~~wind_stability~~ | — | removed: conflicted with tracking_lin_vel |
+| disabled | sustained_walking | 0.0 | disabled: identical to alive |
+| disabled | contact_symmetry | 0.0 | disabled: incentivized standing still |
 
-`only_positive_rewards = True` — negative total reward is clipped to 0.
+`only_positive_rewards = False` — allows negative reward gradient under strong wind.
 
 ## Curriculum Controller (g1_wind_env.py)
 
@@ -124,10 +124,11 @@ base_lin_vel(3) + ang_vel(3) + gravity(3) + commands(3) + dof_pos(12) + dof_vel(
 | 5 | 10-18 | Extreme |
 
 Upgrade: accumulate stats over `upgrade_window=200` resets, advance if `survival > 0.8` AND `tracking > 0.6`.
+Demotion: demote if `survival < 0.3` AND `tracking < 0.2` (prevents getting stuck at too-hard level).
 
 ## PPO Config (g1_wind_config.py)
 - Policy: `ActorCriticRecurrent` (LSTM, hidden_size=64, 1 layer)
-- Actor/Critic: [64, 32] hidden dims, ELU activation
+- Actor/Critic: [128, 64] hidden dims, ELU activation
 - `entropy_coef = 0.01`, `max_iterations = 15000`
 - `experiment_name = 'g1_wind'`
 
@@ -176,8 +177,19 @@ Upgrade: accumulate stats over `upgrade_window=200` resets, advance if `survival
 - [x] Phase 3: Curriculum controller — 6-level window-based curriculum with auto-advancement
 - [x] Phase 4: Training — Run4 (baseline, 1950 iters), Run5 (wind-trained, 1500 iters, reached level 4)
   - Wind init bug fixed (reset_envs at creation)
-- [ ] Phase 5: Testing, analysis, visualization, report
+- [x] Phase 4.5: Code review and fixes (Run6 prep)
+  - S1: Removed wind_stability (conflicted with tracking_lin_vel)
+  - S2: Fixed lean_compensation coordinate frame (world→body frame transform)
+  - S3: Set only_positive_rewards=False, boosted alive 0.15→0.5
+  - M1: Network [64,32]→[128,64]
+  - M2: Curriculum demotion (survival<0.3 AND tracking<0.2)
+  - M3: Wind force clamp (max 500N)
+  - M4: Precomputed curriculum_levels tensor
+  - M5: Normalized wind obs (vel/10, force/100)
+  - Eval script: frozen curriculum during evaluation
+- [ ] Phase 5: Retrain (Run6), evaluate, compare with Run4/Run5
+- [ ] Phase 6: Testing, analysis, visualization, report
   - Quantitative evaluation (survival rate, tracking accuracy per wind level)
-  - Cross-test: Run4 vs Run5 under same wind conditions
+  - Cross-test: Run4 vs Run5 vs Run6 under same wind conditions
   - Ablation experiments (Exp2/Exp4/Exp5) if needed
   - Visualization and report

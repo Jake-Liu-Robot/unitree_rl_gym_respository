@@ -49,6 +49,9 @@ class G1WindRoughCfg(G1RoughCfg):
         survival_threshold = 0.8       # fraction of max episode length
         tracking_threshold = 0.6       # fraction of max tracking reward
         upgrade_window = 200           # num resets to evaluate before level-up
+        # Demotion thresholds — drop a level if performance falls too low
+        demotion_survival_threshold = 0.3   # demote if survival below this
+        demotion_tracking_threshold = 0.2   # AND tracking below this
 
         # For play/test: override starting level (None = use curriculum_start_level)
         play_level = 2
@@ -64,7 +67,7 @@ class G1WindRoughCfg(G1RoughCfg):
     class rewards(G1RoughCfg.rewards):
         soft_dof_pos_limit = 0.9
         base_height_target = 0.78
-        only_positive_rewards = True
+        only_positive_rewards = False  # allow negative reward for gradient under strong wind
         tracking_sigma = 0.25
 
         class scales(G1RoughCfg.rewards.scales):
@@ -83,17 +86,17 @@ class G1WindRoughCfg(G1RoughCfg):
             dof_pos_limits = -5.0
 
             # --- G1 humanoid-specific (inherited) ---
-            alive = 0.15
+            alive = 0.5   # boosted: stronger survival signal with only_positive_rewards=False
             hip_pos = -1.0
             contact_no_vel = -0.2
             feet_swing_height = -20.0
             contact = 0.18
 
             # --- Wind-specific rewards ---
-            wind_stability = -0.5       # penalize CoM velocity error under wind
-            lean_compensation = 0.2     # reward leaning into wind
-            sustained_walking = 0.1     # reward for not falling
-            contact_symmetry = 0.05     # reward symmetric L/R foot contact
+            # wind_stability removed: duplicated tracking_lin_vel with unbounded penalty
+            lean_compensation = 0.3     # reward leaning into wind
+            sustained_walking = 0.0     # disabled: identical to alive reward
+            contact_symmetry = 0.0      # disabled: incentivized standing still
 
 
 class G1WindRoughCfgPPO(G1RoughCfgPPO):
@@ -101,8 +104,8 @@ class G1WindRoughCfgPPO(G1RoughCfgPPO):
 
     class policy(G1RoughCfgPPO.policy):
         init_noise_std = 0.8
-        actor_hidden_dims = [64, 32]    # slightly larger for wind complexity
-        critic_hidden_dims = [64, 32]
+        actor_hidden_dims = [128, 64]   # larger capacity for wind estimation
+        critic_hidden_dims = [128, 64]
         activation = 'elu'
         # LSTM helps with wind estimation from observation history
         rnn_type = 'lstm'
