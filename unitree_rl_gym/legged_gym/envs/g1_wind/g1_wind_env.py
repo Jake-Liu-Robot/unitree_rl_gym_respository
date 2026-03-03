@@ -61,6 +61,10 @@ class G1WindRobot(G1Robot):
             self.wind_survival_acc = 0.0  # accumulated survival fraction
             self.wind_tracking_acc = 0.0  # accumulated tracking performance
 
+            # Initialize wind for all envs so first episode has wind
+            all_env_ids = torch.arange(self.num_envs, device=self.device)
+            self.wind_model.reset_envs(all_env_ids, self.wind_curriculum_level)
+
     def step(self, actions):
         """Override step to apply wind forces before each physics substep."""
         clip_actions = self.cfg.normalization.clip_actions
