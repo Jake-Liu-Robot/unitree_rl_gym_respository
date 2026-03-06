@@ -1,10 +1,12 @@
 # ── Core scientific / RL stack ────────────────────────────────
-numpy==1.23.5          # Isaac Gym compatible version
 scipy
 matplotlib
 tensorboard
 
 # ── Robotics / control ───────────────────────────────────────
+# numpy is pinned and force-reinstalled in the Dockerfile after Isaac Gym.
+# gym/gymnasium: only one needed; rsl_rl works with gym 0.26.x but
+# mujoco 3.x ships its own bindings — no separate gymnasium needed.
 gym==0.26.2            # OpenAI Gym (rsl_rl dependency)
 
 # ── Utilities ────────────────────────────────────────────────

@@ -80,6 +80,8 @@ docker run -it --rm \
     --volume /tmp/.X11-unix:/tmp/.X11-unix \
     -v /usr/share/vulkan/icd.d:/usr/share/vulkan/icd.d \
     -v "$(dirname $(dirname $(pwd)))":/workspace \
+    -v "$(dirname $(dirname $(pwd)))/unitree_rl_gym_respository/unitree_rl_gym":/opt/unitree_rl_gym \
+    -v "$(dirname $(dirname $(pwd)))/unitree_rl_gym_respository/rsl_rl":/opt/rsl_rl \
     "${IMAGE_NAME}:${IMAGE_TAG}"
 
 # ──────────────────────────────────────────────────────────────

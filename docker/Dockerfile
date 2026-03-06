@@ -53,15 +53,13 @@ RUN conda install -y \
 COPY IsaacGym_Preview_4_Package /opt/isaacgym
 RUN cd /opt/isaacgym/isaacgym/python && pip install -e . --no-cache-dir
 
-# ── MuJoCo 2.3.7 ─────────────────────────────────────────────
-# Install mujoco pip package (includes binaries, no manual download needed)
-RUN pip install mujoco==2.3.7 --no-cache-dir
+# ── MuJoCo 3.2.3 ─────────────────────────────────────────────
+# mujoco 3.x is required by deploy_mujoco.py (uses mj_ray raycasting API)
+RUN pip install mujoco==3.2.3 --no-cache-dir
 
-# Install mujoco-py for legacy compatibility (optional but common)
-RUN pip install mujoco-py==2.1.2.14 --no-cache-dir
-
-# Install gymnasium with MuJoCo extras
-RUN pip install gymnasium[mujoco]==0.29.1 --no-cache-dir
+# ── Force numpy after Isaac Gym pins it to 1.20.x ─────────────
+# Isaac Gym's setup.py downgrades numpy; reinstall the version we need.
+RUN pip install "numpy==1.23.5" --force-reinstall --no-cache-dir
 
 # ── rsl_rl (copied from local) ───────────────────────────────
 COPY rsl_rl /opt/rsl_rl

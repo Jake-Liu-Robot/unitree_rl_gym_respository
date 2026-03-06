@@ -1,0 +1,44 @@
+<mujoco model="g1 scene stairs">
+  <include file="g1_12dof.xml"/>
+
+  <statistic center="2.0 0.0 0.5" extent="2.0"/>
+
+  <visual>
+    <headlight diffuse="0.6 0.6 0.6" ambient="0.1 0.1 0.1" specular="0.9 0.9 0.9"/>
+    <rgba haze="0.15 0.25 0.35 1"/>
+    <global azimuth="-160" elevation="-20"/>
+  </visual>
+
+  <asset>
+    <texture type="skybox" builtin="flat" rgb1="0 0 0" rgb2="0 0 0" width="512" height="3072"/>
+    <texture type="2d" name="groundplane" builtin="checker" mark="edge" rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3" markrgb="0.8 0.8 0.8" width="300" height="300"/>
+    <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5" reflectance="0.2"/>
+    <material name="stair" rgba="0.6 0.5 0.4 1"/>
+  </asset>
+
+  <worldbody>
+    <light pos="2 0 4" dir="0 0 -1" directional="true"/>
+    <geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>
+
+    <!-- Staircase: 8 steps ascending                                        -->
+    <!-- step_width=0.31m, step_height=0.10m (matches early curriculum ~iter 3000-5000) -->
+    <!-- Each box extends from floor (z=0) up to the step surface            -->
+    <!-- Step n: top at z = n*0.10, x_center = 0.5 + (n-0.5)*0.31          -->
+    <geom name="step1" type="box" material="stair"
+          pos="0.655 0 0.05"  size="0.155 1.0 0.05"/>
+    <geom name="step2" type="box" material="stair"
+          pos="0.965 0 0.10"  size="0.155 1.0 0.10"/>
+    <geom name="step3" type="box" material="stair"
+          pos="1.275 0 0.15"  size="0.155 1.0 0.15"/>
+    <geom name="step4" type="box" material="stair"
+          pos="1.585 0 0.20"  size="0.155 1.0 0.20"/>
+    <geom name="step5" type="box" material="stair"
+          pos="1.895 0 0.25"  size="0.155 1.0 0.25"/>
+    <geom name="step6" type="box" material="stair"
+          pos="2.205 0 0.30"  size="0.155 1.0 0.30"/>
+    <geom name="step7" type="box" material="stair"
+          pos="2.515 0 0.35"  size="0.155 1.0 0.35"/>
+    <geom name="step8" type="box" material="stair"
+          pos="2.825 0 0.40"  size="0.155 1.0 0.40"/>
+  </worldbody>
+</mujoco>
