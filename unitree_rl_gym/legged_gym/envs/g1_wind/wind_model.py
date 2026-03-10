@@ -223,6 +223,8 @@ class WindModel:
             self.env_ou_theta * (0.0 - self.ou_speed_state) * dt
             + effective_sigma * sqrt_dt * dW_speed
         )
+        # Safety clamp: prevent unbounded drift (should never trigger under normal params)
+        self.ou_speed_state.clamp_(-50.0, 50.0)
 
         # Direction OU: dα = θ_dir(0-α)dt + σ_dir_eff·√dt·dW
         # Direction variability also scales with curriculum level (M1)
@@ -232,6 +234,7 @@ class WindModel:
             self.env_ou_theta_dir * (0.0 - self.ou_angle_state) * dt
             + effective_sigma_dir * sqrt_dt * dW_dir
         )
+        self.ou_angle_state.clamp_(-3.14, 3.14)  # ±π hard bound
 
     # ================================================================
     # Layer 3: gust events

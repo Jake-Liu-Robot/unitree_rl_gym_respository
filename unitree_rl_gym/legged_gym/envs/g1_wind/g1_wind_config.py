@@ -9,6 +9,11 @@ class G1WindRoughCfg(G1RoughCfg):
         num_privileged_obs = 56     # G1 privileged(50) + wind_velocity(3) + wind_force(3)
         num_actions = 12
         episode_length_s = 20
+        # Privileged obs normalization scales for wind channels
+        # wind_vel ~[0,28] m/s at L5 → /10 keeps in [-3, 3]
+        # wind_force ~[0,150] N at L5 → /100 keeps in [-1.5, 1.5]
+        priv_obs_wind_vel_scale = 0.1
+        priv_obs_wind_force_scale = 0.01
 
     class wind:
         """3-layer wind model parameters (v3)."""
@@ -39,6 +44,25 @@ class G1WindRoughCfg(G1RoughCfg):
         # thighs: URDF COM at z=-0.151m ≈ geometric center → CoP-COM ≈ 0
         # shins:  URDF COM at z=-0.121m ≈ geometric center → CoP-COM ≈ 0
         cop_z_offsets = [0.10, 0.005, 0.005, 0.002, 0.002]  # from URDF inertial data
+
+        # Feet separation threshold for feet_distance reward (meters)
+        feet_min_separation = 0.20  # matches G1 hip width
+
+        # Nominal robot mass for base_acc wind compensation (kg)
+        robot_nominal_mass = 35.0   # URDF 32.68 + domain rand center
+
+        # Wind-adaptive gait parameters
+        swing_height_base = 0.08           # base swing height target (m)
+        swing_height_wind_reduction = 0.5  # max fraction reduction at peak wind (0.08→0.04m)
+        stance_ratio_base = 0.55           # base stance phase ratio
+        stance_ratio_wind_increase = 0.20  # max increase at peak wind (0.55→0.75)
+
+        # Wind-adaptive orientation: scale at which orientation penalty halves (N)
+        # 1/(1 + F/F_ref): at 50N → 50%, at 100N → 33%, smooth & never fully zero
+        orientation_wind_scale = 50.0
+
+        # Wind-adaptive base_height: allow crouching under wind to lower COM
+        base_height_wind_reduction = 0.05  # max fraction reduction (0.78→0.741m at 150N)
 
         # Layer 2: OU speed process (defaults, used when ou_randomize=False)
         ou_theta = 0.5              # mean reversion rate (1/s), τ=2s
@@ -90,12 +114,18 @@ class G1WindRoughCfg(G1RoughCfg):
 
         # Curriculum advancement thresholds
         curriculum_start_level = 0
-        survival_threshold = 0.8       # fraction of max episode length
-        tracking_threshold = 0.6       # fraction of max tracking reward
-        upgrade_window = 200           # num resets to evaluate before level-up
+        survival_threshold = 0.7       # fraction of max episode length (relaxed from 0.8)
+        tracking_threshold = 0.4       # fraction of max tracking reward (relaxed from 0.6)
+        upgrade_window = 300           # num resets to evaluate before level-up (more reliable stats)
         # Demotion thresholds — drop a level if performance falls too low
-        demotion_survival_threshold = 0.3   # demote if survival below this
-        demotion_tracking_threshold = 0.2   # AND tracking below this
+        demotion_survival_threshold = 0.4   # demote if survival below this (was 0.3, demote earlier)
+        demotion_tracking_threshold = 0.3   # AND tracking below this (was 0.2)
+        # Mixed-level upgrade: fraction of envs that advance (rest stay for forgetting prevention)
+        upgrade_fraction = 0.8
+        # Fractional demotion: only demote this fraction of envs (prevents oscillation)
+        demotion_fraction = 0.5
+        # Cooldown: skip this many resets after level change before evaluating again
+        upgrade_cooldown = 500
 
         # Per-level force clamp (N) — prevents unlearnable episodes from extreme OU
         # Computed from: F = 0.5*ρ*Cd*A*v², then rounded up with headroom
@@ -125,37 +155,78 @@ class G1WindRoughCfg(G1RoughCfg):
         # Disable push_robots — wind replaces it as continuous perturbation
         push_robots = False
 
+        # Action delay randomization (sim-to-real: computation + communication latency)
+        # Delay in control steps; each control step = sim_dt × decimation = 0.02s (50 Hz)
+        # 0-2 steps = 0-40ms, matching typical real-world latency
+        # Ref: Walk These Ways (Margolis 2023), Rapid Locomotion (Margolis 2022)
+        randomize_action_delay = True
+        action_delay_range = [0, 2]     # inclusive [min, max] in control steps
+
+        # PD gain randomization (actuator model mismatch)
+        # Real motors have ±10-30% variation from nominal stiffness/damping
+        # Ref: ANYmal-DroQ, Walk These Ways
+        randomize_pd_gains = True
+        stiffness_multiplier_range = [0.8, 1.2]    # ±20%
+        damping_multiplier_range = [0.8, 1.2]      # ±20%
+
+        # Motor strength randomization (torque limit variation)
+        # Models motor degradation, voltage sag under load, thermal derating
+        # Asymmetric: can only be weaker than nominal (conservative)
+        # Ref: Rapid Locomotion, Booster Gym 2025
+        randomize_motor_strength = True
+        motor_strength_range = [0.8, 1.0]           # 80-100% of nominal
+
     class rewards(G1RoughCfg.rewards):
         soft_dof_pos_limit = 0.9
         base_height_target = 0.78
         only_positive_rewards = False  # allow negative reward for gradient under strong wind
         tracking_sigma = 0.25
+        # Wind-adaptive tracking: sigma_eff = sigma * (1 + scale * |F_wind| / 100N)
+        # At 100N wind force, sigma doubles (0.25 → 0.50), maintaining gradient
+        # Ref: Xu et al. 2025 (multi-objective RL for force compliance)
+        tracking_sigma_wind_scale = 1.0
 
         class scales(G1RoughCfg.rewards.scales):
             # --- Base walking (inherited, adjusted) ---
             tracking_lin_vel = 1.0
             tracking_ang_vel = 0.5
             lin_vel_z = -2.0
-            ang_vel_xy = -0.05
-            orientation = -1.0
-            base_height = -10.0
+            ang_vel_xy = -0.15          # was -0.2→-0.15: slightly relax for gust angular response
+            orientation = -0.3          # wind-aware override in env: smooth decay 1/(1+F/50N)
+                                        # no-wind: full penalty; 100N: 33% penalty
+            base_height = -10.0         # wind-aware override in env: target lowers under wind
 
             # --- Energy / smoothness ---
-            dof_acc = -2.5e-7
-            dof_vel = -1e-3
+            dof_acc = -1.5e-7           # was -2.5e-7→-1.5e-7: allow faster joint response for wind rejection
+            dof_vel = -5e-4
             action_rate = -0.01
+            action_rate2 = -0.005       # second-order action smoothness ||a_t - 2*a_{t-1} + a_{t-2}||²
+                                        # Ref: Humanoid-Gym 2024
+            power = -2e-4               # was -5e-4→-2e-4: allow more aggressive wind rejection torques
+                                        # Ref: Booster Gym 2025 (sum(max(tau * dq, 0)))
             dof_pos_limits = -5.0
 
             # --- G1 humanoid-specific (inherited) ---
-            alive = 0.5   # boosted: stronger survival signal with only_positive_rewards=False
-            hip_pos = -1.0
-            contact_no_vel = -0.2
-            feet_swing_height = -20.0
+            alive = 1.0                 # was 0.5→1.0: stronger survival incentive
+                                        # Critical with only_positive_rewards=False to prevent
+                                        # "die quickly to avoid negative penalty accumulation"
+            hip_pos = -0.3
+            contact_no_vel = -0.1       # was -0.2→-0.1: wind causes unavoidable foot sliding
+            feet_swing_height = -8.0
             contact = 0.18
 
             # --- Wind-specific rewards ---
-            # wind_stability removed: duplicated tracking_lin_vel with unbounded penalty
-            lean_compensation = 0.3     # reward leaning into wind
+            lean_compensation = 0.8
+            feet_distance = -0.5        # was -0.3→-0.5: stronger wide stance incentive for stability
+                                        # Ref: Booster Gym 2025 (max(d_ref - d_feet, 0))
+            base_acc = -0.002           # wind-compensated base acceleration penalty
+                                        # Ref: Viereck et al. 2024
+            ang_momentum_change = 0.0   # DISABLED: scale too small (-0.0003) for meaningful gradient,
+                                        # adds noise; ang_vel_xy already penalizes angular velocity
+            com_balance = 0.0           # DISABLED: fundamentally conflicts with lean_compensation
+                                        # alive + base_height implicitly enforce balance
+                                        # Ref: Booster Gym 2025, Walk These Ways — no explicit COM reward
+
             sustained_walking = 0.0     # disabled: identical to alive reward
             contact_symmetry = 0.0      # disabled: incentivized standing still
 
@@ -165,19 +236,30 @@ class G1WindRoughCfgPPO(G1RoughCfgPPO):
 
     class policy(G1RoughCfgPPO.policy):
         init_noise_std = 0.8
-        actor_hidden_dims = [128, 64]   # larger capacity for wind estimation
-        critic_hidden_dims = [128, 64]
+        # Asymmetric actor-critic design (literature-conforming):
+        #   Actor:  LSTM(128) → MLP[128,64] → 12   (LSTM-heavy: wind estimation from history)
+        #   Critic: LSTM(128) → MLP[256,128] → 1    (MLP-heavy: privileged wind info processing)
+        # Total: ~250K params (Actor ~110K + Critic ~140K)
+        # Ref: Humanoid-Gym 2024 (LSTM 64, MLP [32]), Walk These Ways (MLP [128,64,32])
+        #      Upper-end of literature range due to wind OU estimation requirement
+        actor_hidden_dims = [128, 64]       # match LSTM output dim, standard for locomotion
+        critic_hidden_dims = [256, 128]     # larger MLP for privileged wind_vel/wind_force
         activation = 'elu'
-        # LSTM helps with wind estimation from observation history
         rnn_type = 'lstm'
-        rnn_hidden_size = 64
-        rnn_num_layers = 1
+        rnn_hidden_size = 128       # literature standard (64-128); 128 for wind OU estimation
+        rnn_num_layers = 1          # (wind OU τ=2-20s via BPTT over 64 steps)
 
     class algorithm(G1RoughCfgPPO.algorithm):
-        entropy_coef = 0.01
+        entropy_coef = 0.008
+        gamma = 0.995               # long horizon for 20s episodes under curriculum
+        learning_rate = 5e-4        # standard for ~250K params (Humanoid-Gym, Walk These Ways)
+        desired_kl = 0.008          # conservative updates during curriculum transitions
+        num_mini_batches = 4        # standard mini-batch count (4096 envs × 64 steps / 4 = 65K per mini-batch)
 
     class runner(G1RoughCfgPPO.runner):
         policy_class_name = "ActorCriticRecurrent"
-        max_iterations = 15000      # more iterations for curriculum training
+        max_iterations = 10000      # ~250K params converges faster; sufficient for 6-level curriculum
+        num_steps_per_env = 64      # longer rollouts for LSTM temporal context
+                                    # 64 steps × 0.02s/step = 1.28s (sim.dt=0.005 × decimation=4)
         run_name = ''
         experiment_name = 'g1_wind'

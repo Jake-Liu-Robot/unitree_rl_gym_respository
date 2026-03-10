@@ -130,24 +130,46 @@ base_lin_vel(3) + ang_vel(3) + gravity(3) + commands(3) + dof_pos(12) + dof_vel(
 
 ## Reward Structure (g1_wind_env.py + inherited from G1Robot)
 
-| Category | Reward | Scale | Source |
-|----------|--------|-------|--------|
-| Base walking | tracking_lin_vel | 1.0 | inherited |
-| Base walking | tracking_ang_vel | 0.5 | inherited |
-| Base walking | orientation | -1.0 | inherited |
-| Base walking | base_height | -10.0 | inherited |
-| Energy | dof_acc / dof_vel / action_rate | -2.5e-7 / -1e-3 / -0.01 | inherited |
-| Humanoid | alive / contact / hip_pos / feet_swing_height | 0.5 / 0.18 / -1.0 / -20.0 | inherited (alive boosted) |
-| **Wind-specific** | **lean_compensation** | **0.3** | reward leaning against wind (scales by wind_force_mag/50N, uses effective_direction with OU drift) |
-| ~~removed~~ | ~~wind_stability~~ | — | removed: conflicted with tracking_lin_vel |
-| disabled | sustained_walking | 0.0 | disabled: identical to alive |
-| disabled | contact_symmetry | 0.0 | disabled: incentivized standing still |
+Literature-informed reward design (Phase 4.9). Key references:
+- Viereck et al. IROS 2024 (moderate orientation, base acceleration)
+- Humanoid-Gym 2024 (second-order action smoothness)
+- Booster Gym 2025 (power penalty, feet distance)
+- Xu et al. 2025 (wind-adaptive tracking sigma)
+- Li et al. 2025 (angular momentum / damping)
+
+| Category | Reward | Scale | Source | Notes |
+|----------|--------|-------|--------|-------|
+| Tracking | tracking_lin_vel | 1.0 | **overridden** | wind-adaptive sigma: σ_eff = 0.25 × (1 + |F_wind|/100) |
+| Tracking | tracking_ang_vel | 0.5 | inherited | |
+| Posture | orientation | -0.3 | **overridden** | wind-aware: penalty × 1/(1+F/50N), no lean conflict |
+| Posture | base_height | -10.0 | **overridden** | wind-aware target: 0.78→0.741m at 150N |
+| Velocity | lin_vel_z | -2.0 | inherited | |
+| Velocity | ang_vel_xy | **-0.15** | inherited | was -0.2→-0.15, relax for gust angular response |
+| Energy | dof_acc | **-1.5e-7** | inherited | was -2.5e-7, allow faster joint response |
+| Energy | dof_vel | -5e-4 | inherited | |
+| Energy | action_rate | -0.01 | inherited | first-order: \|\|a_t - a_{t-1}\|\|² |
+| Energy | action_rate2 | -0.005 | g1_wind | second-order: \|\|a_t - 2a_{t-1} + a_{t-2}\|\|² |
+| Energy | power | **-2e-4** | g1_wind | was -5e-4, allow aggressive wind rejection torques |
+| Limits | dof_pos_limits | -5.0 | inherited | |
+| Humanoid | alive | **1.0** | inherited | was 0.5→1.0, prevent "die early" with negative rewards |
+| Humanoid | contact | 0.18 | **overridden** | wind-adaptive stance ratio: 0.55→0.75 at peak wind |
+| Humanoid | hip_pos | -0.3 | inherited | allow wider stance |
+| Humanoid | contact_no_vel | **-0.1** | inherited | was -0.2, wind causes unavoidable sliding |
+| Humanoid | feet_swing_height | -8.0 | **overridden** | wind-adaptive target: 0.08→0.04m at peak wind |
+| **Wind** | lean_compensation | 0.8 | g1_wind | dominant over orientation under wind |
+| **Wind** | feet_distance | **-0.5** | g1_wind | was -0.3→-0.5, stronger wide stance incentive |
+| **Wind** | base_acc | -0.002 | g1_wind | wind-compensated controllable base_acc_xy² |
+| **Wind** | ang_momentum_change | **0.0** | **disabled** | was -0.0003, negligible gradient contribution |
+| **Wind** | com_balance | **0.0** | **disabled** | conflicts with lean_compensation; alive+base_height suffice |
+| disabled | sustained_walking | 0.0 | — | identical to alive |
+| disabled | contact_symmetry | 0.0 | — | incentivized standing still |
 
 `only_positive_rewards = False` — allows negative reward gradient under strong wind.
+`tracking_sigma_wind_scale = 1.0` — at 100N wind, sigma doubles from 0.25 to 0.50.
 
 ## Curriculum Controller (g1_wind_env.py)
 
-6 levels with window-based advancement (all envs advance together):
+6 levels with window-based advancement + mixed-level upgrade (80% advance, 20% stay):
 
 | Level | Speed (m/s) | Description |
 |-------|------------|-------------|
@@ -158,18 +180,29 @@ base_lin_vel(3) + ang_vel(3) + gravity(3) + commands(3) + dof_pos(12) + dof_vel(
 | 4 | 7-12 | Strong + gusts |
 | 5 | 10-18 | Extreme |
 
-Upgrade: accumulate stats over `upgrade_window=200` resets, advance if `survival > 0.8` AND `tracking > 0.6`.
-Demotion: demote if `survival < 0.3` AND `tracking < 0.2` (prevents getting stuck at too-hard level).
+Upgrade: accumulate stats over `upgrade_window=300` resets, advance 80% of envs if `survival > 0.7` AND `tracking > 0.4`.
+Demotion: demote 50% of envs if `survival < 0.4` AND `tracking < 0.3` (fractional to prevent oscillation).
+Cooldown: skip 500 resets after any level change before evaluating again.
 
 ## PPO Config (g1_wind_config.py)
-- Policy: `ActorCriticRecurrent` (LSTM, hidden_size=64, 1 layer)
-- Actor/Critic: [128, 64] hidden dims, ELU activation
-- `entropy_coef = 0.01`, `max_iterations = 15000`
-- `experiment_name = 'g1_wind'`
+- Policy: `ActorCriticRecurrent` (LSTM hidden_size=128, 1 layer)
+- Asymmetric design (literature-conforming, upper-end for wind estimation):
+  - Actor MLP: [128, 64] — LSTM-heavy (wind estimation from obs history)
+  - Critic MLP: [256, 128] — MLP-heavy (privileged wind info processing)
+- `gamma = 0.995`, `learning_rate = 5e-4` (adaptive schedule)
+- `desired_kl = 0.008`, `entropy_coef = 0.008`
+- `num_steps_per_env = 64`, `num_mini_batches = 4`
+- `max_iterations = 10000`, `experiment_name = 'g1_wind'`
+- Total params: ~250K (Actor ~110K + Critic ~140K)
+- Ref: Humanoid-Gym 2024, Walk These Ways 2023, Gait-Conditioned RL
 
 ## Domain Randomization
 - `push_robots = False` (wind replaces push perturbation)
 - Friction: [0.1, 1.25], Base mass: [-1, +3] kg
+- Action delay: [0, 2] control steps (0-40ms), ring buffer with per-env delay
+- PD gain randomization: stiffness ×[0.8, 1.2], damping ×[0.8, 1.2]
+- Motor strength: ×[0.8, 1.0] (only weaker than nominal)
+- Ref: Walk These Ways, Rapid Locomotion, ANYmal-DroQ, Booster Gym 2025
 
 ## Experiments Plan
 | ID | Name | Wind | Push | Purpose |
@@ -303,6 +336,84 @@ Available runs: `Feb28_21-36-56_` (Run4, baseline), `Feb28_22-07-25_` (Run5, win
   - M2: lean_compensation scales by wind force magnitude / 50N (not binary on/off)
   - Verified: URDF mass 32.68kg vs real G1 35kg — covered by domain randomization [-1,+3]kg
   - Verified: F at 18 m/s (L5 max) ≈ 109N (31.8% body weight), matches Beaufort 8 "gale"
+- [x] Phase 4.9: Literature-informed reward redesign
+  - R1: orientation -1.0→-0.3, lean_compensation 0.3→0.8 (resolve lean conflict, Viereck 2024)
+  - R2: feet_swing_height -20→-8 (reduce over-constraint, Viereck 2024)
+  - R3: hip_pos -1.0→-0.3 (allow wider stance, Booster Gym 2025)
+  - R4: ang_vel_xy -0.05→-0.2 (post-gust damping, Li 2025)
+  - R5: dof_vel -1e-3→-5e-4 (allow braking torques)
+  - R6: Wind-adaptive tracking sigma: σ_eff = σ × (1 + |F_wind|/100) (Xu 2025)
+  - R7: NEW action_rate2 = -0.005 (second-order smoothness, Humanoid-Gym 2024)
+  - R8: NEW power = -5e-4 (motoring-only penalty, Booster Gym 2025)
+  - R9: NEW feet_distance = -0.3 (penalize narrow stance, Booster Gym 2025)
+  - R10: NEW base_acc = -0.002 (base acceleration penalty, Viereck 2024)
+  - Buffer management: last_last_actions via _buf_last_actions rotation in _post_physics_step_callback
+- [x] Phase 4.10: Reward robustness fixes
+  - F1: base_acc wind compensation — subtract F_wind/m, only penalize controllable acceleration
+  - F2: feet_distance min_sep moved from hardcode to config (wind.feet_min_separation)
+  - F3: NEW ang_momentum_change = -0.0003 (angular acceleration penalty, Li 2025; reduced from -0.001 to avoid penalizing unavoidable gust-onset angular accel)
+  - F4: NEW com_balance = -10.0 (COM over support center; raised from -2.0 for meaningful gradient at small deviations)
+  - F5: Override feet_swing_height — wind-adaptive target: 0.08→0.04m at 150N
+  - F6: Override contact — wind-adaptive stance ratio: 0.55→0.75 at 150N
+  - F7: Config: robot_nominal_mass, swing_height_base/wind_reduction, stance_ratio_base/wind_increase
+  - F8: CLAUDE.md synced — fixed power (-1e-4→-5e-4), base_acc (-0.01→-0.002)
+- [x] Phase 4.11: Network, reward, PPO, curriculum overhaul
+  - N1: LSTM hidden_size 64→128 (more capacity for wind OU estimation, τ=2-5s)
+  - N2: Asymmetric actor-critic MLP:
+    - Actor [128,64]→[128,64] (LSTM-heavy: 78% params in LSTM for wind estimation)
+    - Critic [128,64]→[256,128] (MLP-heavy: privileged wind info processing)
+  - N3: Removed inverted bottleneck (128→256 expansion wasted 33K params)
+  - R1: alive 0.5→1.0 (prevent "die early" under only_positive_rewards=False)
+  - R2: com_balance -10.0→-1.5 (severe conflict with lean_compensation resolved)
+  - R3: ang_momentum_change -0.0003→0.0 (disabled: negligible gradient, noise only)
+  - R4: power -5e-4→-2e-4 (allow aggressive wind rejection torques)
+  - R5: dof_acc -2.5e-7→-1.5e-7 (faster joint response for wind)
+  - R6: contact_no_vel -0.2→-0.1 (wind causes unavoidable sliding)
+  - R7: feet_distance -0.3→-0.5 (stronger wide stance incentive)
+  - R8: ang_vel_xy -0.2→-0.15 (relax for gust angular response)
+  - P1: gamma 0.99→0.995 (longer horizon for 20s episodes)
+  - P2: learning_rate 1e-3→5e-4 (larger network, adaptive schedule adjusts)
+  - P3: desired_kl 0.01→0.008 (conservative updates during curriculum transitions)
+  - P4: entropy_coef 0.01→0.008 (slightly less exploration with bigger network)
+  - P5: num_steps_per_env 24→64 (1.28s rollout: 64 × 0.02s control dt)
+  - C1: survival_threshold 0.8→0.7, tracking_threshold 0.6→0.4 (relaxed advancement)
+  - C2: demotion thresholds 0.3/0.2→0.4/0.3 (demote earlier)
+  - C3: upgrade_window 200→300 (more reliable statistics)
+  - C4: Mixed-level upgrade: 80% envs advance, 20% stay (catastrophic forgetting prevention)
+- [x] Phase 4.12: Pre-training optimization (reward conflict resolution + network + curriculum)
+  - R1: orientation → wind-aware override: penalty × 1/(1+F/50N), eliminates lean conflict
+  - R2: base_height → wind-aware override: target 0.78→0.741m at 150N (lower COM under wind)
+  - R3: com_balance -1.5→0.0 (disabled: fundamental conflict with lean_compensation)
+  - N1: LSTM 128→256 (standard capacity for wind OU estimation)
+  - N2: Actor MLP [128,64]→[256,128] (match LSTM output, avoid bottleneck)
+  - N3: Critic MLP [256,128]→[512,256] (larger for privileged wind info)
+  - N4: Total params 277K→930K
+  - P1: learning_rate 5e-4→3e-4 (larger network)
+  - P2: max_iterations 15000→20000 (more training for larger network)
+  - P3: num_mini_batches 4→8 (smaller mini-batch stabilizes larger network)
+  - C1: Fractional demotion 100%→50% (prevents level oscillation)
+  - C2: Cooldown 500 resets after level change (stabilize before re-evaluating)
+- [x] Phase 4.13: Domain randomization enhancement (pre-training)
+  - DR1: Action delay randomization: [0, 2] control steps (0-40ms)
+    - Ring buffer implementation, per-env delay sampled at reset
+    - Obs shows intended action, torque uses delayed action (LSTM compensates)
+    - Ref: Walk These Ways (Margolis 2023), Rapid Locomotion (Margolis 2022)
+  - DR2: PD gain randomization: stiffness ×[0.8,1.2], damping ×[0.8,1.2]
+    - Per-env multipliers, re-sampled each episode
+    - Override _compute_torques with randomized gains
+    - Ref: ANYmal-DroQ, Walk These Ways
+  - DR3: Motor strength randomization: torque_limits ×[0.8,1.0]
+    - Asymmetric: only weaker (models degradation, voltage sag)
+    - Ref: Rapid Locomotion, Booster Gym 2025
+- [x] Phase 4.14: Literature-conforming network/PPO parameters
+  - N1: LSTM hidden_size 256→128 (literature standard 64-128; 128 for wind OU estimation)
+  - N2: Actor MLP [256,128]→[128,64] (matches Humanoid-Gym scale)
+  - N3: Critic MLP [512,256]→[256,128] (still asymmetric, larger for privileged obs)
+  - N4: Total params ~930K→~250K (within literature range for locomotion)
+  - P1: learning_rate 3e-4→5e-4 (standard for ~250K params)
+  - P2: num_mini_batches 8→4 (standard, 65K samples per mini-batch)
+  - P3: max_iterations 20000→10000 (smaller network converges faster)
+  - Ref: Humanoid-Gym 2024, Walk These Ways 2023, Gait-Conditioned RL
 - [ ] Phase 5: Retrain (Run6), evaluate, compare with Run4/Run5
 - [ ] Phase 6: Testing, analysis, visualization, report
   - Quantitative evaluation (survival rate, tracking accuracy per wind level)
