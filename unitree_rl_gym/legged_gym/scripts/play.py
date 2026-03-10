@@ -30,6 +30,30 @@ def play(args):
     obs = env.get_observations()
     # load policy
     train_cfg.runner.resume = True
+
+    # --- Auto-detect network dims from checkpoint to handle old runs ---
+    from legged_gym.utils import get_load_path
+    log_root = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', train_cfg.runner.experiment_name)
+    _checkpoint = args.checkpoint if args.checkpoint is not None else -1
+    resume_path = get_load_path(log_root, load_run=args.load_run, checkpoint=_checkpoint)
+    print("Loading model from:", resume_path)
+    loaded = torch.load(resume_path, map_location='cpu')
+    if 'model_state_dict' in loaded:
+        sd = loaded['model_state_dict']
+        # Infer actor hidden dims from checkpoint weights
+        actor_layers = sorted([k for k in sd if k.startswith('actor.') and 'weight' in k])
+        if actor_layers:
+            actor_dims = [sd[k].shape[0] for k in actor_layers[:-1]]  # exclude output layer
+            critic_layers = sorted([k for k in sd if k.startswith('critic.') and 'weight' in k])
+            critic_dims = [sd[k].shape[0] for k in critic_layers[:-1]]
+            if actor_dims != train_cfg.policy.actor_hidden_dims:
+                print(f"[compat] Overriding actor_hidden_dims: {train_cfg.policy.actor_hidden_dims} -> {actor_dims}")
+                train_cfg.policy.actor_hidden_dims = actor_dims
+            if critic_dims != train_cfg.policy.critic_hidden_dims:
+                print(f"[compat] Overriding critic_hidden_dims: {train_cfg.policy.critic_hidden_dims} -> {critic_dims}")
+                train_cfg.policy.critic_hidden_dims = critic_dims
+    del loaded
+
     ppo_runner, train_cfg = task_registry.make_alg_runner(env=env, name=args.task, args=args, train_cfg=train_cfg)
     policy = ppo_runner.get_inference_policy(device=env.device)
     

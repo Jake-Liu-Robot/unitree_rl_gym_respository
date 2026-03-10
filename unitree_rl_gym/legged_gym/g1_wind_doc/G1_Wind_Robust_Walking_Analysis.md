@@ -95,8 +95,8 @@ gym.apply_rigid_body_force_at_pos_tensors(
 风力作用于人形机器人有几个维度的复杂性：
 
 - **风力不是单一力**：真实风作用在整个机器人表面，不同部位（头部、躯干、腿部）受力不同。但过于精确的建模会增加仿真开销且对策略训练意义不大。
-- **建议方案**：将风力简化为作用在 **torso（躯干）** 上的集中力。理由是躯干是最大迎风面（约占总迎风面积 60-70%），且 torso 的运动直接影响整体平衡。这是一个合理的工程近似。
-- **不要建模的东西**：翼展效应、紊流涡流、地面边界层等。这些超出了项目范围，也不会显著改变策略行为。
+- **已实现方案（v3.2）**：多刚体气动力模型。风力分布到 5 个刚体：pelvis(55%) + 两大腿(12%×2) + 两小腿(8%×2)。每个刚体独立计算：相对速度 v_rel=v_wind-v_body (P0)、3D 椭球投影面积 A_eff=√((A_front·|dx|)²+(A_side·|dy|)²+(A_top·|dz|)²) 使用逐刚体四元数 (P1)、高度风速剖面 v(z)=v_ref×(z/z_ref)^0.28 (P2)、力施加在压力中心（body-local z 轴偏移，经四元数旋转到世界坐标）(P3)。Cd=1.1。
+- **未建模的效果**：翼展效应、上游遮蔽、紊流涡流、空间风场相干性等。这些对 <1m 高的机器人影响在 5-10% 以内，不影响策略训练。
 
 ### 2.2 风速参数范围的合理设定
 
@@ -110,7 +110,8 @@ gym.apply_rigid_body_force_at_pos_tensors(
 | 10 级（狂风） | 24.5-28.4 | 94-126 N | 27-36% |
 | 12 级（飓风） | 32.7+ | 167+ N | 48%+ |
 
-注：按 ρ=1.225 kg/m³，Cd=1.2，A=0.35 m² 计算。
+注：按 ρ=1.225 kg/m³，Cd=1.2，A=0.35 m² 计算（初始估算值）。
+实际实现（v3.2）使用 Cd=1.1，A_front=0.50 m²，A_side=0.22 m²，A_top=0.10 m²（3D 椭球投影）。
 
 **建议训练范围**：从 4 级风（~10N）开始 curriculum，目标达到 8-10 级风（~50-120N）。超过体重 30% 的风力在物理上已经很难保持直立行走（人类在 10 级风中也很难站稳）。
 
@@ -194,102 +195,52 @@ legged_gym/envs/g1_wind/
 
 **Step 2：实现风力模型**
 
-在 `g1_wind_env.py` 中实现三层风力模型：
+在 `wind_model.py` 中实现三层风速模型（v3 — 输出速度，力计算在 env 中）：
 
-```python
-class WindModel:
-    """
-    三层风力模型：基础风 + OU 过程波动 + 阵风脉冲
-    """
-    def __init__(self, num_envs, device, cfg):
-        self.num_envs = num_envs
-        self.device = device
-        
-        # --- 基础风参数（每个 episode reset 时重新采样）---
-        self.base_wind_speed = torch.zeros(num_envs, device=device)  # 标量风速
-        self.base_wind_dir = torch.zeros(num_envs, 2, device=device)  # [cos θ, sin θ]
-        
-        # --- OU 过程状态（持续更新）---
-        self.ou_velocity = torch.zeros(num_envs, 3, device=device)  # 3D 风速波动
-        
-        # --- 阵风状态 ---
-        self.gust_active = torch.zeros(num_envs, dtype=torch.bool, device=device)
-        self.gust_timer = torch.zeros(num_envs, device=device)
-        self.gust_force = torch.zeros(num_envs, 3, device=device)
-        
-    def reset(self, env_ids, curriculum_level):
-        """Episode reset 时重新采样风况参数"""
-        n = len(env_ids)
-        # 基础风速根据 curriculum level 调整范围
-        max_speed = cfg.wind_speed_range[0] + curriculum_level * (
-            cfg.wind_speed_range[1] - cfg.wind_speed_range[0])
-        self.base_wind_speed[env_ids] = torch.rand(n, device=self.device) * max_speed
-        
-        # 随机风向
-        theta = torch.rand(n, device=self.device) * 2 * math.pi
-        self.base_wind_dir[env_ids, 0] = torch.cos(theta)
-        self.base_wind_dir[env_ids, 1] = torch.sin(theta)
-        
-        # 重置 OU 状态
-        self.ou_velocity[env_ids] = 0.0
-        
-    def step(self, dt):
-        """每个 physics step 更新风力"""
-        # 1. OU 过程更新
-        theta_ou = 0.5   # 均值回归速度
-        sigma_ou = 2.0   # 波动幅度
-        noise = torch.randn_like(self.ou_velocity) * math.sqrt(dt)
-        self.ou_velocity += theta_ou * (0 - self.ou_velocity) * dt + sigma_ou * noise
-        
-        # 2. 计算总风速向量
-        base_vec = torch.zeros(self.num_envs, 3, device=self.device)
-        base_vec[:, 0] = self.base_wind_dir[:, 0] * self.base_wind_speed
-        base_vec[:, 1] = self.base_wind_dir[:, 1] * self.base_wind_speed
-        total_wind_vel = base_vec + self.ou_velocity
-        
-        # 3. 阵风触发（随机触发）
-        gust_trigger = torch.rand(self.num_envs, device=self.device) < (dt * 0.1)
-        # ... 阵风逻辑 ...
-        
-        # 4. 风速 → 风力（简化空气动力学）
-        rho = 1.225
-        Cd = 1.2
-        A = 0.35  # G1 torso 迎风面积
-        wind_force = 0.5 * rho * Cd * A * total_wind_vel * torch.abs(total_wind_vel)
-        
-        return wind_force  # shape: [num_envs, 3]
+```
+三层叠加，矢量加法合成：
+
+Layer 1 (基风): per-episode 恒定 base_angle + base_speed（从课程等级范围中采样）
+Layer 2 (OU湍流):
+  速度 OU: dv = θ(0-v)dt + σ_eff·√dt·dW,  σ_eff = 0.18×base_speed×(1+0.15×level) + 0.1
+  方向 OU: dα = θ_dir(0-α)dt + σ_dir·√dt·dW,  θ_dir=0.2, σ_dir=0.15 → ±14°(1σ)
+  Per-episode 参数随机化：θ∈[0.2,1.0], σ∈[0.05,0.25], θ_dir∈[0.05,0.5], σ_dir∈[0.02,0.25]
+Layer 3 (阵风): 独立速度向量
+  speed = Uniform(2,6) × (1+0.2×level),  dir = base ±60°
+  梯形包络: envelope = min(t/0.3, (dur-t)/0.5) clamp [0,1]
+  概率: 0.1/s × (1+0.1×level)
+
+wind_velocity = (base_speed + ou_speed) × dir(base_angle + ou_angle)  +  gust_vel
+wind_velocity = clamp(‖wind_velocity‖, max=speed_clamp_per_level)
+speed_clamp_per_level = [0, 5, 8, 13, 20, 28] m/s
 ```
 
-**Step 3：在环境中施加风力**
+关键设计：
+- 阵风是独立速度向量叠加（非速度乘数），避免 v² 放大效应
+- L0 速度钳制=0，确保无风等级真正零风
+- 逐级速度钳制防止 OU 尾部+阵风叠加产生非物理极端值（修复前 L5 曾达 67 m/s）
 
-```python
-class G1WindEnv(LeggedRobot):
-    def __init__(self, cfg, sim_params, physics_engine, sim_device, headless):
-        super().__init__(cfg, sim_params, physics_engine, sim_device, headless)
-        self.wind_model = WindModel(self.num_envs, self.device, cfg.wind)
-        
-    def _post_physics_step_callback(self):
-        """每个 step 调用，施加风力"""
-        super()._post_physics_step_callback()
-        
-        # 更新风力
-        wind_force = self.wind_model.step(self.dt)
-        
-        # 构建 force tensor
-        forces = torch.zeros(
-            self.num_envs, self.num_bodies, 3, 
-            dtype=torch.float, device=self.device
-        )
-        forces[:, self.torso_idx, :] = wind_force
-        
-        # 施加到仿真
-        self.gym.apply_rigid_body_force_tensors(
-            self.sim,
-            gymtorch.unwrap_tensor(forces.reshape(-1, 3)),
-            None,
-            gymapi.ENV_SPACE
-        )
+**Step 3：在环境中施加风力（v3 per-body 气动力）**
+
+`G1WindRobot.step()` 重写了基类的 `step()`，在每个 physics substep（decimation 循环内）的 `gym.simulate()` 之前调用 `_apply_wind_force()`。v3 改进：
+
 ```
+P0: v_rel = v_wind(z) - v_body                     # 相对速度（逐刚体）
+P1: A_eff = sqrt((A_front·|dx|)² + (A_side·|dy|)² + (A_top·|dz|)²)
+                                                     # 3D 椭球投影面积（逐刚体四元数）
+P2: v_wind(z) = v_ref × (z/z_ref)^0.28             # 高度风速剖面（城市地形 α=0.28）
+P3: CoP = COM + quat_rotate(body_quat, [0,0,offset]) # body-local z 轴偏移，产生倾倒力矩
+
+F_i = 0.5×ρ×Cd × A_eff × fraction_i × |v_rel_i|² × v_rel_hat_i
+total_force = clamp(Σ F_i, max=force_clamp_per_level)
+force_clamp_per_level = [5, 15, 30, 60, 100, 150] N
+```
+
+力分布到 5 个刚体：pelvis(55%) + 两大腿(12%×2) + 两小腿(8%×2)。
+CoP 偏移（URDF 导出）：[+0.10, +0.005, +0.005, +0.002, +0.002] m（body-local z 轴）。
+通过 `apply_rigid_body_force_at_pos_tensors` 在 CoP 位置施力（ENV_SPACE），
+Isaac Gym 自动从力臂计算力矩。每个 substep 后刷新 rigid_body_state 以获取准确的刚体速度和四元数。
+物理常数：ρ=1.225 kg/m³, Cd=1.1。逐级力钳制：[5, 15, 30, 60, 100, 150] N。
 
 ### 3.3 Phase 2：Reward 设计（第 2-3 周）
 
@@ -322,65 +273,24 @@ reward_scales = {
 }
 ```
 
-**风力专用 reward 函数示例：**
+**风力专用 reward 函数（已实现）：**
 
-```python
-def _reward_wind_lean_compensation(self):
-    """
-    奖励机器人向风源方向倾斜，类似人在大风中前倾的自然反应。
-    计算重力投影与风力方向的对齐程度。
-    """
-    gravity_proj = self.projected_gravity[:, :2]  # body frame 中的重力 xy 分量
-    wind_dir_body = self._world_to_body(self.wind_model.get_direction())
-    alignment = torch.sum(gravity_proj * wind_dir_body, dim=1)
-    wind_strength = self.wind_model.get_magnitude()
-    # 只在有风时奖励倾斜
-    return torch.clamp(alignment * wind_strength / 50.0, 0, 1)
+`_reward_lean_compensation`：奖励机器人向风源方向倾斜。使用 `effective_direction`（含 OU 方向漂移）转换到 body frame 后与重力投影做点积。reward 按风力大小连续缩放（wind_force_mag / 50N，clamp max=1.0），低风时信号弱，强风时信号满。scale=0.3。
 
-def _reward_com_stability(self):
-    """
-    奖励质心投影在双脚支撑区域内。
-    """
-    # 计算 CoM 在支撑多边形内的 margin
-    # （简化：用左右脚中心计算）
-    com_xy = self.root_states[:, :2]
-    foot_center = 0.5 * (self.left_foot_pos[:, :2] + self.right_foot_pos[:, :2])
-    com_offset = torch.norm(com_xy - foot_center, dim=1)
-    return torch.exp(-com_offset / 0.1)
-```
+其他风力 reward（sustained_walking, contact_symmetry）已禁用（scale=0.0），因分析发现与已有 reward 冲突或鼓励站立不动。
 
 ### 3.4 Phase 3：Curriculum 设计（第 3-4 周）
 
 ```
-Level 0: 无风 → 学会基本行走
-  ↓ 存活率 > 90%
-Level 1: 恒定轻风（10-20N，固定方向）→ 学会稳态补偿
-  ↓ 速度跟踪误差 < 0.3 m/s
-Level 2: 变向轻风（OU 过程，σ 小）→ 学会方向适应
-  ↓ 存活率 > 80%
-Level 3: 中等风 + 方向变化（30-50N，OU 过程，σ 中）
-  ↓ 存活率 > 70%
-Level 4: 强风（50-80N，OU 过程 + 偶发阵风）
-  ↓ 存活率 > 60%
-Level 5: 极端风（80-120N，OU 过程 + 频繁阵风 + 方向突变）
+Level 0: 无风（0 m/s）→ 学会基本行走
+Level 1: 轻风（1-3 m/s）→ 学会稳态补偿
+Level 2: 轻中风（2-5 m/s）→ 学会方向适应（OU 方向漂移 ±14°）
+Level 3: 中风（4-8 m/s）→ 适应中等风力 + 阵风
+Level 4: 强风（7-12 m/s）→ 阵风更频繁更强（prob×1.4, speed×1.8）
+Level 5: 极端（10-18 m/s）→ 强湍流（I≈0.44）+ 强阵风（speed×2.0）
 ```
 
-**Curriculum 自动升级逻辑：**
-
-```python
-def _update_wind_curriculum(self):
-    """基于存活率和速度跟踪自动升级风力难度"""
-    # 统计各 level 的存活率
-    for level in range(self.max_wind_level):
-        mask = self.wind_levels == level
-        if mask.sum() > 0:
-            survival = self.episode_length_buf[mask].float().mean() / self.max_episode_length
-            tracking = self.episode_sums["tracking_lin_vel"][mask].mean()
-            
-            if survival > 0.8 and tracking > threshold:
-                # 升级该 level 的环境
-                self.wind_levels[mask] = min(level + 1, self.max_wind_level)
-```
+**Curriculum 自动升级逻辑（已实现）**：窗口累积式（upgrade_window=200 次 reset），所有 env 一起升/降级。升级条件：survival>0.8 AND tracking>0.6。降级条件：survival<0.3 AND tracking<0.2。
 
 ### 3.5 Phase 4：训练与实验（第 4-6 周）
 
@@ -394,18 +304,31 @@ def _update_wind_curriculum(self):
 | Exp 4: Ablation - No Curriculum | 无 curriculum 直接强风训练 | wind=True, curriculum=False, 中等风力 |
 | Exp 5: Ablation - No Wind Reward | 去掉风力专用 reward | wind=True, 只保留基础 reward |
 
-**每个策略的统一评估 protocol：**
+**每个策略的统一评估 protocol（已实现 → eval_wind_robustness.py）：**
 
 ```
-评估场景：
-├── 场景 A: 无风行走（sanity check）
-├── 场景 B: 正面恒定风（10/30/50/80/100/120N）
-├── 场景 C: 侧面恒定风（同上力度）
-├── 场景 D: 背面恒定风
-├── 场景 E: OU 过程随机风（不同 σ）
-├── 场景 F: 阵风突袭（基础风 + 突发 3x 增大）
-└── 场景 G: 瞬时推力（验证交叉泛化能力）
+Suite A: 风速级别扫描（Level 0-5，完整模型）
+Suite B: 风力模式分解
+  ├── B1: 纯恒定风（Layer 1 only）— 稳态补偿能力
+  ├── B2: 恒定风+湍流（L1+L2）— 持续波动适应
+  ├── B3: 恒定风+阵风（L1+L3）— 突发冲击反应
+  ├── B4: 完整模型（L1+L2+L3）— 综合表现
+  └── B5: 纯阵风（L3 only）— 无基风时的阵风恢复
+Suite C: 风向测试
+  ├── C1-C4: 固定方向（正面/侧面/背面/斜向 45°）
+  └── C5: 随机方向
+Suite D: OU 参数极端值
+  ├── D1: 极稳定（θ=1.0, σ=0.05）— 近恒定风
+  ├── D2: 极湍流（θ=0.2, σ=0.4）— 剧烈波动
+  ├── D3: 风向锁定（θ_dir=1.0, σ_dir=0.02）
+  ├── D4: 风向飘忽（θ_dir=0.05, σ_dir=0.25）
+  └── D5: 训练默认值参考
+Suite E: 分布外模式
+  ├── E1: 阶跃风（0→10m/s at t=5s）
+  └── E2: 周期风（5+5sin(2πt/4)）
 ```
+
+支持 A/B policy 对比：`--load_run <A> --load_run2 <B>` 自动输出存活率差异表。
 
 ### 3.6 Phase 5：分析与报告（第 7-8 周）
 
@@ -425,52 +348,43 @@ def _update_wind_curriculum(self):
 
 **问题**：Isaac Gym 的 `apply_rigid_body_force_tensors` 只在调用的那个 physics timestep 生效。如果在 `post_physics_step` 中调用，力在下一个 step 才生效；如果在 `pre_physics_step` 中调用，需要确保在 `simulate()` 之前完成。
 
-**解决方案**：在 `step()` 函数中，在 `self.gym.simulate(self.sim)` 之前调用风力施加。具体来说，需要重写 `LeggedRobot.step()` 方法，在物理仿真步骤之前插入风力施加逻辑：
-
-```python
-def step(self, actions):
-    # ... 动作处理 ...
-    
-    # 在 simulate 之前施加风力
-    self._apply_wind_forces()
-    
-    self.gym.simulate(self.sim)
-    # ... 后续逻辑 ...
-```
-
-**调试建议**：可以通过 viewer 的 `draw_env_rigid_contacts` 验证力是否正确施加，或者监测 base velocity 的变化是否符合预期。
+**解决方案（已实现）**：`G1WindRobot.step()` 重写基类 `step()`，在 decimation 循环内每个 substep 的 `gym.simulate()` 之前调用 `_apply_wind_force()`。每个 substep 都推进 WindModel（OU + 阵风状态更新），确保力在物理仿真前施加。v3 中每个 substep 后额外调用 `refresh_rigid_body_state_tensor()` 以获取准确的刚体位置和速度，用于下一个 substep 的相对速度计算 (P0) 和高度因子计算 (P2)。
 
 ### 4.2 难点二：Force Tensor 的形状和索引
 
 **问题**：`apply_rigid_body_force_tensors` 接受的 tensor 形状是 `[num_envs × num_bodies, 3]`，是一个展平的 tensor。你需要正确找到 torso body 在这个展平 tensor 中的索引。
 
-**解决方案**：
-
-```python
-# 在 _create_envs 中获取 torso body 的索引
-self.torso_idx = self.gym.find_body_handle(env, actor, "torso_link")
-
-# 在施加力时，正确计算展平索引
-forces = torch.zeros(self.num_envs * self.num_bodies, 3, device=self.device)
-# 每个 env 的 torso 在展平 tensor 中的位置：env_id * num_bodies + torso_idx
-torso_indices = torch.arange(self.num_envs, device=self.device) * self.num_bodies + self.torso_idx
-forces[torso_indices] = wind_force  # [num_envs, 3]
-```
-
-**关键注意**：G1 的 body 名称需要在 URDF 中确认。不同配置（23 DOF vs 29 DOF）的 body 数量和名称可能不同。
+**解决方案（已实现）**：在 `_init_buffers()` 中通过 `find_actor_rigid_body_handle()` 获取所有受风刚体的索引，预计算 `wind_body_flat_indices = [num_envs, num_wind_bodies]` 展平索引。力/位置张量形状 `[num_envs * num_bodies, 3]`，通过 scatter 操作将 5 个风力刚体的力和 CoP 位置写入正确位置。v3 使用 `apply_rigid_body_force_at_pos_tensors` 在 CoP 处施力（自动计算力矩），替代了 v2 的 `apply_rigid_body_force_tensors`（仅在质心施力）。
 
 ### 4.3 难点三：OU 过程的参数调优
 
-**问题**：OU 过程的三个参数（均值 μ、回归速度 θ、波动 σ）直接决定了风力的"感觉"。参数不当会导致要么风力变化太快（像白噪声，失去时间相关性），要么太慢（像恒定风，失去变化性）。
+**问题**：OU 过程的参数直接决定了风力的"感觉"。参数不当会导致变化太快（像白噪声）或太慢（像恒定风）。
 
-**解决方案**：
+**v2 解决方案（已实现）**：
 
-- **θ（回归速度）**：建议范围 0.3-1.0。θ=0.5 意味着风速波动的"半衰期"约 1.4 秒，这与自然风的 gust 频率大致吻合
-- **σ（波动幅度）**：应该与基础风速成比例。建议 σ = 0.3 × base_wind_speed，即波动幅度约为基础风速的 30%
-- **μ（长期均值）**：设为 0（围绕基础风速波动），基础风速在 episode reset 时采样
-- **离散化时间步**：使用 Euler-Maruyama 方法，dt 取仿真的 control timestep（通常 0.02s）
+风模型使用两个独立 OU 过程——速度 OU 和方向 OU：
 
-**验证方法**：绘制 OU 过程的轨迹图，目视确认风速变化的合理性。
+**速度 OU**：dv = θ(0-v)dt + σ_eff·√dt·dW
+- **θ_speed=0.5**：τ=2s，对应 1m 高度小尺度湍流的积分时间
+- **σ=0.18×base_speed**：稳态湍流强度 TI ≈ 0.34-0.44（v3.1 从 0.25 降至 0.18 以匹配实测数据）
+- **σ_min=0.1 m/s**：确保最低噪声（但 L0 通过 speed_clamp=0 强制零风）
+- **level_scale=1+0.15×level**：高级别湍流更强（L5 时 TI≈0.44，对应极端粗糙地形）
+
+**方向 OU**（v2 新增）：dα = θ_dir(0-α)dt + σ_dir·√dt·dW
+- **θ_dir=0.2**：τ=5s，方向变化慢于速度变化（物理上风向更"惰性"）
+- **σ_dir=0.15**：稳态 std = 0.15/√0.4 ≈ 0.24 rad ≈ ±14°(1σ)，符合横向湍流 σ_v≈0.75×σ_u
+
+**离散化**：Euler-Maruyama 方法，dt = physics substep（~0.005s）。
+
+**Per-episode 参数随机化**（v2 新增，ou_randomize=True）：
+每次 episode reset 时，从以下范围中独立采样每个 env 的 OU 参数：
+- θ_speed ∈ [0.2, 1.0]：有的 episode 波动快回归，有的慢漂移
+- σ_speed ∈ [0.05, 0.25]：有的 episode 极稳定，有的极湍流（v3.1 从上限 0.4 降至 0.25 以控制 TI）
+- θ_dir ∈ [0.05, 0.5]：有的 episode 风向锁定，有的飘忽
+- σ_dir ∈ [0.02, 0.25]：方向波动幅度也随机
+
+效果：每个 episode 的风"性格"不同，策略无法过拟合到单一 OU 节奏，
+被迫学会通用的反应式控制策略。本质是 Domain Randomization 应用在风力动力学参数上。
 
 ### 4.4 难点四：Reward 权重平衡
 
@@ -525,30 +439,32 @@ for i in range(self.gym.get_asset_rigid_body_count(robot_asset)):
 - 已有的 domain randomization 框架（friction、mass randomization）
 - 已有的 `push_robots` 机制（你的起点）
 
-**你只需要新增/修改的部分：**
+**已完成的新增/修改文件：**
 
 ```
-需要修改的文件（~5 个文件，~500 行新代码）：
+已实现的文件（4 个文件）：
 
-1. 新建 legged_gym/envs/g1_wind/g1_wind_config.py
-   - 继承 G1RoughCfg
-   - 新增 wind 配置块（OU 参数、风速范围、curriculum 设置）
-   - 新增 wind-specific reward scales
+1. legged_gym/envs/g1_wind/g1_wind_config.py  ✓
+   - 继承 G1RoughCfg，wind 配置块（OU 速度+方向参数、阵风参数、curriculum）
+   - wind-specific reward scales
 
-2. 新建 legged_gym/envs/g1_wind/g1_wind_env.py
-   - 继承 LeggedRobot
-   - 实现 WindModel 类
-   - 重写 step() 加入风力施加
-   - 重写 _post_physics_step_callback() 更新风力状态
-   - 重写 reset_idx() 重置风力参数
-   - 新增 reward 函数
+2. legged_gym/envs/g1_wind/g1_wind_env.py  ✓
+   - 继承 G1Robot，重写 step()/reset_idx()/compute_observations()
+   - 风力施加、课程控制器、lean_compensation reward
 
-3. 修改 legged_gym/envs/__init__.py
-   - 注册新任务 "g1_wind"
+3. legged_gym/envs/g1_wind/wind_model.py  ✓ (v3.2)
+   - 三层风速模型：基风 + OU 速度&方向湍流 + 独立阵风速度向量
+   - 输出风速（m/s），力计算移至 g1_wind_env.py（per-body 气动力 P0-P3）
+   - Per-episode OU 参数随机化（θ/σ/θ_dir/σ_dir 从范围中采样）
+   - 方向 OU sigma 随课程等级缩放（与速度 OU 相同的 sigma_scale）
+   - 逐级速度钳制防止极端值
 
-4. 可选：修改 rsl_rl 的 runner
-   - 如果使用 RNN/LSTM policy，需要配置 history length
-   - 通常不需要修改 rsl_rl 本身
+4. legged_gym/envs/__init__.py  ✓
+   - 注册 "g1_wind" → G1WindRobot
+
+5. legged_gym/g1_wind_test/eval_wind_robustness.py  ✓
+   - 5 维测试矩阵：level × mode × direction × OU extreme × OOD pattern
+   - A/B policy 对比功能
 ```
 
 **rsl_rl 无需修改：**

@@ -8,10 +8,16 @@ from legged_gym.envs.g1_wind.wind_model import WindModel
 
 
 class G1WindRobot(G1Robot):
-    """G1 humanoid robot with continuous wind disturbance.
+    """G1 humanoid robot with physically accurate wind disturbance (v3).
 
     Extends G1Robot with:
-    - 3-layer wind force model (base + OU + gusts) applied to torso
+    - 3-layer wind velocity model (base + OU + gusts)
+    - Per-body aerodynamic force computation:
+        P0: Relative velocity (v_wind - v_body) for accurate drag
+        P1: Direction-dependent projected area (cross-flow principle)
+        P2: Height-dependent wind speed (power law boundary layer)
+        P3: Force at center of pressure via apply_rigid_body_force_at_pos_tensors
+    - Per-curriculum-level force clamping
     - Wind-specific reward functions
     - Wind curriculum controller
     - Wind velocity in privileged observations
@@ -43,18 +49,54 @@ class G1WindRobot(G1Robot):
                 dtype=torch.long, device=self.device
             )
 
-            # Force tensor for apply_rigid_body_force_tensors
-            # Shape: [num_envs * num_bodies, 3]
+            # --- Aerodynamic force coefficient: 0.5 * ρ * Cd (without area) ---
+            self.aero_force_coeff = (
+                0.5 * self.cfg.wind.air_density * self.cfg.wind.drag_coefficient
+            )
+
+            # --- Force tensor for apply_rigid_body_force_at_pos_tensors ---
             self.wind_force_tensor = torch.zeros(
                 self.num_envs * self.num_bodies, 3,
                 dtype=torch.float, device=self.device
             )
-
-            # Precompute torso indices for all envs: env_i * num_bodies + torso_idx
-            self.torso_indices = (
-                torch.arange(self.num_envs, device=self.device) * self.num_bodies
-                + self.torso_body_idx
+            # Position tensor (P3): application point for each body
+            self.wind_pos_tensor = torch.zeros(
+                self.num_envs * self.num_bodies, 3,
+                dtype=torch.float, device=self.device
             )
+
+            # --- Multi-body force distribution ---
+            self.force_body_fractions = torch.tensor(
+                self.cfg.wind.force_body_fractions,
+                dtype=torch.float, device=self.device
+            )  # [num_wind_bodies]
+
+            # Find and store body indices for wind-receiving bodies
+            wind_body_local_indices = []
+            for name in self.cfg.wind.force_body_names:
+                idx = self.gym.find_actor_rigid_body_handle(
+                    self.envs[0], self.actor_handles[0], name
+                )
+                wind_body_local_indices.append(idx)
+            self.wind_body_local_indices = wind_body_local_indices  # Python list for tensor indexing
+
+            # Precompute flat indices: [num_envs, num_wind_bodies]
+            env_offsets = torch.arange(self.num_envs, device=self.device) * self.num_bodies
+            body_offsets = torch.tensor(wind_body_local_indices, device=self.device)
+            self.wind_body_flat_indices = env_offsets.unsqueeze(1) + body_offsets.unsqueeze(0)
+
+            # P3: Center of pressure vertical offsets per wind body
+            self.cop_z_offsets = torch.tensor(
+                self.cfg.wind.cop_z_offsets,
+                dtype=torch.float, device=self.device
+            )  # [num_wind_bodies]
+
+            # P3: CoP local offset vectors (along each body's local z-axis)
+            self.cop_local_offsets = torch.zeros(
+                len(self.cfg.wind.force_body_names), 3,
+                dtype=torch.float, device=self.device
+            )
+            self.cop_local_offsets[:, 2] = self.cop_z_offsets  # [num_wind_bodies, 3]
 
             # Curriculum evaluation: accumulate stats over a window of resets
             self.wind_reset_counter = 0
@@ -87,6 +129,11 @@ class G1WindRobot(G1Robot):
                 self.gym.fetch_results(self.sim, True)
             self.gym.refresh_dof_state_tensor(self.sim)
 
+            # Refresh rigid body state after each simulate for accurate
+            # body velocities/positions in the next substep's wind computation
+            if self.cfg.wind.enable:
+                self.gym.refresh_rigid_body_state_tensor(self.sim)
+
         self.post_physics_step()
 
         clip_obs = self.cfg.normalization.clip_observations
@@ -96,20 +143,113 @@ class G1WindRobot(G1Robot):
         return self.obs_buf, self.privileged_obs_buf, self.rew_buf, self.reset_buf, self.extras
 
     def _apply_wind_force(self):
-        """Compute wind force and apply to torso via Isaac Gym API."""
-        # Advance wind model by one physics substep
+        """Compute and apply aerodynamic forces with full per-body physics.
+
+        P0: Relative velocity — F ∝ |v_wind - v_body|² (not just v_wind²)
+        P1: Projected area — per-body 3D ellipsoidal using v_rel direction + body quaternions
+        P2: Height profile — v(z) = v_ref × (z/z_ref)^α (boundary layer)
+        P3: Center of pressure — CoP offset in body-local frame, rotated to world
+        """
         physics_dt = self.sim_params.dt
-        wind_force = self.wind_model.step(physics_dt)  # [num_envs, 3]
+        wind_vel = self.wind_model.step(physics_dt)  # [num_envs, 3] m/s
 
-        # Fill force tensor (sparse: only torso body gets force)
+        num_wind_bodies = len(self.cfg.wind.force_body_names)
+
+        # --- Get per-body states for wind-receiving bodies ---
+        # rigid_body_states_view: [num_envs, num_bodies, 13] (from G1Robot._init_foot)
+        # 13 = pos(3) + quat(4) + lin_vel(3) + ang_vel(3)
+        wind_body_states = self.rigid_body_states_view[:, self.wind_body_local_indices, :]
+        body_pos = wind_body_states[:, :, 0:3]    # [num_envs, num_wind_bodies, 3]
+        body_vel = wind_body_states[:, :, 7:10]   # [num_envs, num_wind_bodies, 3]
+        body_quat = wind_body_states[:, :, 3:7]   # [num_envs, num_wind_bodies, 4]
+        body_heights = body_pos[:, :, 2]           # [num_envs, num_wind_bodies]
+
+        # --- P2: Height-dependent wind speed scaling ---
+        if self.cfg.wind.height_profile_enabled:
+            ref_h = self.cfg.wind.reference_height
+            alpha = self.cfg.wind.height_exponent
+            min_ratio = self.cfg.wind.min_height_ratio
+            height_factor = (body_heights / ref_h).clamp(min=min_ratio) ** alpha
+            # [num_envs, num_wind_bodies]
+        else:
+            height_factor = torch.ones_like(body_heights)
+
+        # Expand wind_vel for per-body computation: [num_envs, 1, 3] → broadcast
+        wind_vel_expanded = wind_vel.unsqueeze(1)  # [num_envs, 1, 3]
+        scaled_wind_vel = wind_vel_expanded * height_factor.unsqueeze(2)
+        # [num_envs, num_wind_bodies, 3]
+
+        # --- P0: Relative velocity ---
+        v_rel = scaled_wind_vel - body_vel  # [num_envs, num_wind_bodies, 3]
+        v_rel_speed = torch.norm(v_rel, dim=2)  # [num_envs, num_wind_bodies]
+        v_rel_dir = v_rel / v_rel_speed.unsqueeze(2).clamp(min=1e-8)
+
+        # --- P1: Per-body 3D ellipsoidal projected area ---
+        # B1 fix: uses v_rel direction (not wind_vel) for area computation
+        # B3 fix: includes z-component via A_top for tilted bodies
+        # B4 fix: uses per-body quaternions (not just base_quat)
+        flat_quat = body_quat.reshape(-1, 4)  # [num_envs * num_wind_bodies, 4]
+        flat_v_rel_dir = v_rel_dir.reshape(-1, 3)
+        v_rel_body = quat_rotate_inverse(flat_quat, flat_v_rel_dir)
+        v_rel_body = v_rel_body.reshape(self.num_envs, num_wind_bodies, 3)
+
+        # A_eff = sqrt((A_front·|dx|)² + (A_side·|dy|)² + (A_top·|dz|)²)
+        dx = v_rel_body[:, :, 0].abs()  # [num_envs, num_wind_bodies]
+        dy = v_rel_body[:, :, 1].abs()
+        dz = v_rel_body[:, :, 2].abs()
+        effective_area = torch.sqrt(
+            (self.cfg.wind.frontal_area_front * dx) ** 2
+            + (self.cfg.wind.frontal_area_side * dy) ** 2
+            + (self.cfg.wind.frontal_area_top * dz) ** 2
+        )  # [num_envs, num_wind_bodies]
+
+        # --- Compute per-body aerodynamic force ---
+        # F_i = 0.5 * ρ * Cd * A_eff_i * fraction_i * |v_rel_i|² × v_rel_hat_i
+        fractions = self.force_body_fractions  # [num_wind_bodies]
+
+        force_mag = (
+            self.aero_force_coeff
+            * effective_area                    # [num_envs, num_wind_bodies]
+            * fractions.unsqueeze(0)            # [1, num_wind_bodies]
+            * v_rel_speed ** 2                  # [num_envs, num_wind_bodies]
+        )  # [num_envs, num_wind_bodies]
+
+        per_body_force = v_rel_dir * force_mag.unsqueeze(2)  # [num_envs, num_wind_bodies, 3]
+
+        # --- Per-level force clamp (on total force magnitude) ---
+        total_force = per_body_force.sum(dim=1)  # [num_envs, 3]
+        total_mag = torch.norm(total_force, dim=1)  # [num_envs]
+        max_level = self.wind_model.force_clamp_tensor.shape[0] - 1
+        per_env_clamp = self.wind_model.force_clamp_tensor[
+            self.wind_curriculum_level.clamp(max=max_level)
+        ]  # [num_envs]
+        clamp_ratio = (per_env_clamp / total_mag.clamp(min=1e-8)).clamp(max=1.0)
+        per_body_force = per_body_force * clamp_ratio.unsqueeze(1).unsqueeze(2)
+
+        # Store total wind force for observations
+        self.wind_model.wind_force = per_body_force.sum(dim=1)  # [num_envs, 3]
+
+        # --- P3: Center of pressure positions ---
+        # B2 fix: CoP offset along body-local z-axis (not world z-axis)
+        # When robot tilts, CoP follows the tilted body axis correctly
+        flat_local_offsets = self.cop_local_offsets.repeat(self.num_envs, 1)
+        world_offsets = quat_rotate(flat_quat, flat_local_offsets)
+        cop_positions = body_pos + world_offsets.reshape(
+            self.num_envs, num_wind_bodies, 3
+        )
+
+        # --- Scatter into tensors and apply ---
         self.wind_force_tensor[:] = 0.0
-        self.wind_force_tensor[self.torso_indices] = wind_force
+        self.wind_pos_tensor[:] = 0.0
+        flat_idx = self.wind_body_flat_indices.reshape(-1)  # [num_envs * num_wind_bodies]
+        self.wind_force_tensor[flat_idx] = per_body_force.reshape(-1, 3)
+        self.wind_pos_tensor[flat_idx] = cop_positions.reshape(-1, 3)
 
-        # Apply — must be before gym.simulate()
-        self.gym.apply_rigid_body_force_tensors(
+        # Apply forces at center of pressure positions (automatic torque computation)
+        self.gym.apply_rigid_body_force_at_pos_tensors(
             self.sim,
             gymtorch.unwrap_tensor(self.wind_force_tensor),
-            None,  # no torque
+            gymtorch.unwrap_tensor(self.wind_pos_tensor),
             gymapi.ENV_SPACE
         )
 
@@ -240,31 +380,27 @@ class G1WindRobot(G1Robot):
     def _reward_lean_compensation(self):
         """Reward leaning against wind force to maintain balance.
 
-        Both vectors must be in the same frame. We transform wind direction
-        from world frame to body frame so it matches projected_gravity.
-
-        In body frame: projected_gravity points opposite to the body's "up".
-        When the robot leans into the wind, the gravity vector's horizontal
-        component aligns with the wind direction (in body frame).
-        We reward negative dot product = leaning against wind.
+        Uses effective_direction (base + OU drift) so the reward tracks
+        the real-time wind heading, not just the episode-initial direction.
         """
         if not self.cfg.wind.enable:
             return torch.zeros(self.num_envs, device=self.device)
 
         gravity_xy = self.projected_gravity[:, :2]  # body frame [num_envs, 2]
 
-        # Transform wind direction from world frame to body frame
+        # Transform current wind direction (with OU drift) to body frame
         wind_dir_body = quat_rotate_inverse(
-            self.base_quat, self.wind_model.base_direction
+            self.base_quat, self.wind_model.effective_direction
         )  # [num_envs, 3]
         wind_dir_body_xy = wind_dir_body[:, :2]  # [num_envs, 2]
 
         # Negative dot product = leaning against the wind force direction
         lean_against_wind = -torch.sum(gravity_xy * wind_dir_body_xy, dim=1)
 
-        # Only reward when wind is actually blowing
-        wind_active = self.wind_model.base_speed > 0.5
-        return lean_against_wind * wind_active.float()
+        # M2 fix: scale by wind force magnitude — stronger wind needs more lean
+        wind_force_mag = torch.norm(self.wind_model.wind_force, dim=1)
+        wind_scale = (wind_force_mag / 50.0).clamp(max=1.0)  # normalize by ~L3 force
+        return lean_against_wind * wind_scale
 
     def _reward_sustained_walking(self):
         """Reward for remaining alive and walking (not falling).

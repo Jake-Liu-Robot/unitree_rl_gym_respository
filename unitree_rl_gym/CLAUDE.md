@@ -30,9 +30,10 @@ unitree_rl_gym/
 │   │   └── __init__.py                  # Task registry: "g1_wind" → G1WindRobot
 │   ├── g1_wind_test/                    # ★ Test scripts
 │   │   ├── eval_g1_wind.py             # Quantitative evaluation across wind levels
+│   │   ├── eval_wind_robustness.py     # Comprehensive robustness eval (modes/dirs/OU/OOD)
 │   │   └── smoke_test_g1_wind.py       # Quick env verification
 │   ├── g1_wind_doc/                     # ★ Documentation
-│   │   ├── README.md                   # Wind environment documentation (Chinese)
+│   │   ├── g1_wind_test.md             # Wind environment test notes
 │   │   └── G1_Wind_Robust_Walking_Analysis.md  # Research analysis
 │   ├── scripts/
 │   │   ├── train.py
@@ -57,29 +58,63 @@ LeggedRobotCfgPPO → G1RoughCfgPPO → G1WindRoughCfgPPO
 | `self.phase` | `G1Robot._post_physics_step_callback()` :60 | `(episode_length_buf * dt) % 0.8 / 0.8`, only exists after first `step()` |
 | `self.torso_body_idx` | `G1WindRobot._init_buffers()` :24 | `find_actor_rigid_body_handle(..., "pelvis")` → index 0 |
 | `self.wind_model` | `G1WindRobot._init_buffers()` :30 | `WindModel` instance, only when `cfg.wind.enable=True` |
+| `wind_model.effective_direction` | `WindModel.step()` | Real-time wind direction (base + OU drift), used by lean_compensation reward |
+| `self.wind_body_flat_indices` | `G1WindRobot._init_buffers()` | [num_envs, num_wind_bodies] flat indices for multi-body force scatter |
+| `self.force_body_fractions` | `G1WindRobot._init_buffers()` | [num_wind_bodies] area fraction per body for force distribution (0.55/0.12/0.12/0.08/0.08) |
 
-## Wind Force Model (Implemented in wind_model.py)
+## Wind Model v3 (wind_model.py + g1_wind_env.py)
 
-Three-layer superposition, all GPU-vectorized:
+### Wind Velocity (wind_model.py) — 3-layer superposition
 ```
-effective_speed = clamp(base_speed + ou_state, min=0) × gust_factor
-force = 0.5 × ρ × Cd × A × effective_speed²
-wind_force = direction × force   # [num_envs, 3]
+# Layer 1+2: base wind with OU fluctuation (speed + direction)
+effective_speed = clamp(base_speed + ou_speed_state, min=0)
+effective_dir   = (cos(base_angle + ou_angle_state), sin(...), 0)
+base_vel        = effective_speed × effective_dir
+
+# Layer 3: independent gust velocity vector
+gust_vel = gust_speed × envelope(t) × gust_dir
+
+# Combined wind velocity (m/s, world frame)
+wind_velocity = base_vel + gust_vel
 ```
 
 | Layer | Mechanism | Key params |
 |-------|-----------|-----------|
-| 1: Base wind | Per-episode constant direction (xy plane) + speed | Speed range from curriculum level |
-| 2: OU process | Ornstein-Uhlenbeck fluctuation | θ=0.5, σ=0.3×base_speed |
-| 3: Gusts | Random bursts via Poisson-like trigger | 2-3× multiplier, 1-2s duration, prob=0.3/s |
+| 1: Base wind | Per-episode constant direction + speed | Speed range from curriculum level |
+| 2: OU process | Speed OU + directional OU, **per-episode randomized** | θ∈[0.2,1.0], σ∈[0.05,0.25], θ_dir∈[0.05,0.5], σ_dir∈[0.02,0.25] |
+| 3: Gusts | Independent velocity vector, trapezoidal envelope | speed=[2,6]m/s, dir=base±60°, ramp 0.3s/0.5s, prob=0.1/s |
 
-Physical constants: ρ=1.225 kg/m³, Cd=1.0, A=0.5 m²
+Per-level speed clamp: [0, 5, 8, 13, 20, 28] m/s — prevents OU+gust producing unrealistic extremes
 
-### Force Application (g1_wind_env.py)
-- `step()` overrides base: applies wind force BEFORE `gym.simulate()` on every physics substep
-- Force tensor: sparse [num_envs × num_bodies, 3], only pelvis body gets force
-- Precomputed `torso_indices = arange(num_envs) * num_bodies + torso_body_idx`
-- Coordinate frame: `gymapi.ENV_SPACE`
+### Per-Body Aerodynamics (g1_wind_env.py) — v3 physics improvements
+```
+# P0: Relative velocity (wind - body velocity)
+v_rel = v_wind(z) - v_body          # per-body, not just wind speed
+
+# P1: Per-body 3D ellipsoidal projected area (using v_rel direction + body quaternions)
+A_eff = sqrt((A_front×|dx|)² + (A_side×|dy|)² + (A_top×|dz|)²)   # per-body local frame
+# A_front=0.50 m², A_side=0.22 m², A_top=0.10 m²
+
+# P2: Height-dependent wind speed (power law boundary layer)
+v_wind(z) = v_ref × (z / z_ref)^α   # α=0.28 (urban terrain), z_ref=0.85m (pelvis height)
+
+# Per-body force
+F_i = 0.5×ρ×Cd × A_eff × fraction_i × |v_rel_i|² × v_rel_hat_i
+
+# Per-level force clamp on total magnitude
+total_force = clamp(Σ F_i, max=per_level_clamp)
+
+# P3: Apply at center of pressure (not COM)
+# CoP offset along body-local z-axis: [+0.10, +0.005, +0.005, +0.002, +0.002] m (URDF-derived)
+# Rotated to world frame via per-body quaternions → correct torque when tilted
+gym.apply_rigid_body_force_at_pos_tensors(sim, forces, cop_positions, ENV_SPACE)
+```
+
+Physical constants: ρ=1.225 kg/m³, Cd=1.1
+Force bodies: pelvis(55%) + thighs(12%×2) + shins(8%×2) = 95%
+Per-level force clamp: [5, 15, 30, 60, 100, 150] N
+Per-level speed clamp: [0, 5, 8, 13, 20, 28] m/s
+Rigid body state refreshed after each physics substep for accurate per-body velocities
 
 ## Observation Space (g1_wind_config.py)
 
@@ -103,7 +138,7 @@ base_lin_vel(3) + ang_vel(3) + gravity(3) + commands(3) + dof_pos(12) + dof_vel(
 | Base walking | base_height | -10.0 | inherited |
 | Energy | dof_acc / dof_vel / action_rate | -2.5e-7 / -1e-3 / -0.01 | inherited |
 | Humanoid | alive / contact / hip_pos / feet_swing_height | 0.5 / 0.18 / -1.0 / -20.0 | inherited (alive boosted) |
-| **Wind-specific** | **lean_compensation** | **0.3** | reward leaning against wind (body-frame corrected) |
+| **Wind-specific** | **lean_compensation** | **0.3** | reward leaning against wind (scales by wind_force_mag/50N, uses effective_direction with OU drift) |
 | ~~removed~~ | ~~wind_stability~~ | — | removed: conflicted with tracking_lin_vel |
 | disabled | sustained_walking | 0.0 | disabled: identical to alive |
 | disabled | contact_symmetry | 0.0 | disabled: incentivized standing still |
@@ -145,6 +180,36 @@ Demotion: demote if `survival < 0.3` AND `tracking < 0.2` (prevents getting stuc
 | Exp4 | No-Curriculum | ON (fixed medium) | OFF | Ablation |
 | Exp5 | No-Wind-Reward | ON+Curriculum | OFF | Ablation (base rewards only) |
 
+## Common Commands
+
+```bash
+# --- Training ---
+python legged_gym/scripts/train.py --task=g1_wind --headless
+python legged_gym/scripts/train.py --task=g1_wind --load_run Mar02_21-49-27_ --checkpoint 3750  # resume
+
+# --- Play (visualize) --- must specify --load_run
+python legged_gym/scripts/play.py --task=g1_wind --load_run Mar02_21-49-27_
+python legged_gym/scripts/play.py --task=g1_wind --load_run Mar02_21-49-27_ --checkpoint 3750
+
+# --- Evaluation (basic level sweep) ---
+python legged_gym/g1_wind_test/eval_g1_wind.py --task g1_wind --load_run Mar02_21-49-27_ --headless
+
+# --- Robustness evaluation (comprehensive) ---
+python legged_gym/g1_wind_test/eval_wind_robustness.py --task g1_wind --load_run Mar02_21-49-27_ --headless               # all suites
+python legged_gym/g1_wind_test/eval_wind_robustness.py --task g1_wind --load_run Mar02_21-49-27_ --suite modes --headless   # wind mode decomposition
+python legged_gym/g1_wind_test/eval_wind_robustness.py --task g1_wind --load_run Mar02_21-49-27_ --suite ou --headless      # OU extremes
+python legged_gym/g1_wind_test/eval_wind_robustness.py --task g1_wind --load_run Mar02_21-49-27_ --suite ood --headless     # out-of-distribution
+# A/B comparison between two policies:
+python legged_gym/g1_wind_test/eval_wind_robustness.py --task g1_wind --load_run <run_A> --load_run2 <run_B> --headless
+
+# --- Smoke test ---
+python legged_gym/g1_wind_test/smoke_test_g1_wind.py
+```
+
+Note: `play.py` requires `--load_run <run_dir>` to locate the model. Without it will raise FileNotFoundError.
+
+Available runs: `Feb28_21-36-56_` (Run4, baseline), `Feb28_22-07-25_` (Run5, wind-trained), `Mar02_21-49-27_` (Run6, latest)
+
 ## Coding Conventions
 - Inherit from existing classes — don't rewrite base code
 - All tensors on GPU (`self.device`), use torch operations, no Python loops over envs
@@ -168,7 +233,7 @@ Demotion: demote if `survival < 0.3` AND `tracking < 0.2` (prevents getting stuc
 ## Caveats
 - `self.phase` only exists after first `step()` call (created in `_post_physics_step_callback`)
 - `net_contact_force_tensor` is unreliable on GPU + triangle mesh terrain
-- `apply_rigid_body_force_tensors` must be called BEFORE `gym.simulate()`
+- `apply_rigid_body_force_at_pos_tensors` must be called BEFORE `gym.simulate()`
 
 ## Development Phases
 - [x] Phase 0: Research and analysis (DONE — see G1_Wind_Robust_Walking_Analysis.md)
@@ -183,13 +248,65 @@ Demotion: demote if `survival < 0.3` AND `tracking < 0.2` (prevents getting stuc
   - S3: Set only_positive_rewards=False, boosted alive 0.15→0.5
   - M1: Network [64,32]→[128,64]
   - M2: Curriculum demotion (survival<0.3 AND tracking<0.2)
-  - M3: Wind force clamp (max 500N)
+  - M3: Wind force clamp (per-level: L0=5N → L5=150N)
   - M4: Precomputed curriculum_levels tensor
   - M5: Normalized wind obs (vel/10, force/100)
   - Eval script: frozen curriculum during evaluation
+- [x] Phase 4.6: Wind model v2
+  - Layer 2: Added directional OU (θ_dir=0.2, σ_dir=0.15 → ±14° 1σ drift)
+  - Layer 2: OU sigma scales with curriculum (1+0.15×level), added σ_min=0.1 floor
+  - Layer 2: Reduced base sigma 0.3→0.25 (I≈0.25, suburban terrain)
+  - Layer 3: Gust changed from speed multiplier to independent force vector (no v² amplification)
+  - Layer 3: Independent gust direction (base ±60°)
+  - Layer 3: Trapezoidal envelope (ramp_up=0.3s, ramp_down=0.5s, no step discontinuity)
+  - Layer 3: Reduced frequency 0.3→0.1/s, increased duration [1,2]→[1.5,3]s
+  - Layer 3: Gust speed & prob scale with curriculum level
+  - Per-level force clamp [5,15,30,60,100,150]N (replaces global 500N cap)
+  - Multi-body force distribution: pelvis(55%)+thighs(12%×2)+shins(8%×2) = 95%
+  - lean_compensation uses effective_direction (real-time, not episode-initial)
+  - Per-episode OU parameter randomization (θ, σ, θ_dir, σ_dir sampled from ranges)
+  - Comprehensive robustness eval framework: eval_wind_robustness.py
+    - Suite A: wind level sweep
+    - Suite B: wind mode decomposition (steady/turbulent/gusts/full)
+    - Suite C: wind direction tests (front/side/back/diagonal/random)
+    - Suite D: OU parameter extremes (calm/turbulent/locked/erratic)
+    - Suite E: out-of-distribution patterns (step change, periodic)
+    - A/B policy comparison support
+- [x] Phase 4.7: Wind model v3 — physically accurate aerodynamics
+  - P0: Relative velocity (v_wind - v_body) instead of v_wind only (fixes ~40% force error)
+  - P1: Direction-dependent projected area: A_front=0.50, A_side=0.22 m² (elliptical projection)
+    - Elliptical: A_eff = sqrt((A_front·cosθ)² + (A_side·sinθ)²) guarantees A_eff ≤ A_front
+    - Replaced cross-flow formula which overshoot at oblique angles (109% at 30°)
+  - P2: Height-dependent wind speed: v(z) = v_ref × (z/z_ref)^α (boundary layer profile, initially α=1/7)
+  - P3: Force at center of pressure via apply_rigid_body_force_at_pos_tensors (tipping torque)
+  - CoP vertical offsets: pelvis +0.08m, thighs +0.02m, shins +0.01m above COM
+  - Wind model refactored: outputs velocity only, force computation in env with per-body physics
+  - Rigid body state refreshed per physics substep for accurate body velocities
+  - Removed single frontal_area constant, replaced with directional A_front/A_side
+  - v3.1 fixes: reduced OU sigma 0.25→0.18, σ_range [.05,.4]→[.05,.25], gust speed [3,8]→[2,6]
+  - Added per-level speed clamp [0,5,8,13,20,28] m/s to prevent OU+gust extremes (was 67m/s at L5)
+  - L0 now truly zero wind (speed_clamp=0 overrides ou_sigma_min noise)
+- [x] Phase 4.8: Wind model v3.2 — physics review fixes
+  - B1: A_eff now uses v_rel direction (not wind_vel) for projected area computation
+  - B2: CoP offset along body-local z-axis via quat_rotate (not world z-axis)
+  - B3: 3D ellipsoidal area model: A_eff = sqrt((A_front·dx)² + (A_side·dy)² + (A_top·dz)²)
+    - Added frontal_area_top = 0.10 m² for vertical wind component on tilted bodies
+  - B4: Per-body quaternions for A_eff (each body's own orientation, not just base_quat)
+  - P1: Cd 1.0 → 1.1 (closer to measured humanoid bluff body Cd=1.0-1.3)
+  - P2: Height exponent α=1/7 (open terrain) → α=0.28 (urban/suburban terrain)
+  - P3: CoP offsets refined from URDF inertial data:
+    - pelvis +0.08m → +0.10m (COM z=-0.076m, effective CoP for 55% upper body)
+    - thighs +0.02m → +0.005m (COM z=-0.151m ≈ geometric center)
+    - shins +0.01m → +0.002m (COM z=-0.121m ≈ geometric center)
+    - Final: [+0.10, +0.005, +0.005, +0.002, +0.002] m
+  - M1: Direction OU sigma now scales with curriculum level (same sigma_scale as speed OU)
+  - M2: lean_compensation scales by wind force magnitude / 50N (not binary on/off)
+  - Verified: URDF mass 32.68kg vs real G1 35kg — covered by domain randomization [-1,+3]kg
+  - Verified: F at 18 m/s (L5 max) ≈ 109N (31.8% body weight), matches Beaufort 8 "gale"
 - [ ] Phase 5: Retrain (Run6), evaluate, compare with Run4/Run5
 - [ ] Phase 6: Testing, analysis, visualization, report
   - Quantitative evaluation (survival rate, tracking accuracy per wind level)
   - Cross-test: Run4 vs Run5 vs Run6 under same wind conditions
+  - Robustness eval: modes × directions × OU extremes × OOD patterns
   - Ablation experiments (Exp2/Exp4/Exp5) if needed
   - Visualization and report
