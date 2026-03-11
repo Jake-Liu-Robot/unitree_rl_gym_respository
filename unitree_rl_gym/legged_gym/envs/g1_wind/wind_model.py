@@ -71,6 +71,11 @@ class WindModel:
         self.wind_force = torch.zeros(num_envs, 3, device=device)  # set by env after force computation
         self.effective_direction = torch.zeros(num_envs, 3, device=device)
 
+        # --- Layer disable flags (for evaluation mode) ---
+        # When True, the corresponding layer is skipped in step()
+        self.disable_ou = False
+        self.disable_gusts = False
+
         # --- Per-env curriculum level (for parameter scaling) ---
         self.env_level = torch.zeros(num_envs, dtype=torch.long, device=device)
 
@@ -164,16 +169,20 @@ class WindModel:
             wind_velocity: Tensor [num_envs, 3] — velocity in world frame (m/s)
         """
         # --- Layer 2: update OU processes ---
-        self._update_ou(dt)
+        if not self.disable_ou:
+            self._update_ou(dt)
 
         # --- Layer 3: update gust lifecycle ---
-        self._update_gusts(dt)
+        if not self.disable_gusts:
+            self._update_gusts(dt)
 
         # --- Wind velocity (Layer 1 + Layer 2) ---
-        effective_speed = torch.clamp(self.base_speed + self.ou_speed_state, min=0.0)
-
-        # Direction with angular OU offset
-        current_angle = self.base_angle + self.ou_angle_state
+        if self.disable_ou:
+            effective_speed = torch.clamp(self.base_speed, min=0.0)
+            current_angle = self.base_angle
+        else:
+            effective_speed = torch.clamp(self.base_speed + self.ou_speed_state, min=0.0)
+            current_angle = self.base_angle + self.ou_angle_state
         self.effective_direction[:, 0] = torch.cos(current_angle)
         self.effective_direction[:, 1] = torch.sin(current_angle)
         self.effective_direction[:, 2] = 0.0
@@ -181,8 +190,11 @@ class WindModel:
         base_vel = self.effective_direction * effective_speed.unsqueeze(1)
 
         # --- Gust velocity (Layer 3) ---
-        gust_envelope = self._compute_gust_envelope()
-        gust_vel = self.gust_direction * (self.gust_speed * gust_envelope).unsqueeze(1)
+        if self.disable_gusts:
+            gust_vel = torch.zeros_like(base_vel)
+        else:
+            gust_envelope = self._compute_gust_envelope()
+            gust_vel = self.gust_direction * (self.gust_speed * gust_envelope).unsqueeze(1)
 
         # --- Combined wind velocity ---
         total_vel = base_vel + gust_vel
