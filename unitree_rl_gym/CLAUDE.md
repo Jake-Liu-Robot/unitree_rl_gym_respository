@@ -36,7 +36,7 @@ unitree_rl_gym/
 │   │   └── G1_Wind_Robust_Walking_Analysis.md  # Research analysis
 │   ├── scripts/
 │   │   ├── train.py
-│   │   └── play.py
+│   │   └── play.py                    # Visual observation with wind/command control
 │   └── utils/
 ├── rsl_rl/                              # PPO implementation (do NOT modify)
 ├── resources/robots/g1_description/     # G1 URDF models (g1_12dof.urdf, g1_29dof.urdf, etc.)
@@ -219,18 +219,38 @@ Cooldown: skip 500 resets after any level change before evaluating again.
 python legged_gym/scripts/train.py --task=g1_wind --headless
 python legged_gym/scripts/train.py --task=g1_wind --load_run Mar02_21-49-27_ --checkpoint 3750  # resume
 
-# --- Play (visualize) --- must specify --load_run
-python legged_gym/scripts/play.py --task=g1_wind --load_run Mar02_21-49-27_
-python legged_gym/scripts/play.py --task=g1_wind --load_run Mar02_21-49-27_ --checkpoint 3750
+# --- Play (visual observation with scenario control) ---
+# Basic (defaults: L5, full wind, random commands, 4 envs)
+python legged_gym/scripts/play.py --task=g1_wind --load_run Mar10_18-22-48_
+# No wind baseline
+python legged_gym/scripts/play.py --task=g1_wind --load_run Mar10_18-22-48_ --wind_level 0 --fix_vx 0.6
+# L5 steady frontal wind, standing
+python legged_gym/scripts/play.py --task=g1_wind --load_run Mar10_18-22-48_ --wind_level 5 --wind_mode steady --wind_angle 0 --fix_vx 0 --fix_vy 0
+# L5 side wind, walking
+python legged_gym/scripts/play.py --task=g1_wind --load_run Mar10_18-22-48_ --wind_level 5 --wind_mode steady --wind_angle 90 --fix_vx 0.6
+# L5 full model (turbulence + gusts)
+python legged_gym/scripts/play.py --task=g1_wind --load_run Mar10_18-22-48_ --wind_level 5 --fix_vx 0.6
+# OOD: wind direction reversal at t=5s
+python legged_gym/scripts/play.py --task=g1_wind --load_run Mar10_18-22-48_ --wind_level 5 --ood_pattern reversal --fix_vx 0.6
 
-# --- Evaluation (all suites: levels/modes/directions/ou/ood) ---
-python legged_gym/g1_wind_test/eval_wind_robustness.py --task g1_wind --load_run Mar10_18-22-48_ --headless               # all suites
-python legged_gym/g1_wind_test/eval_wind_robustness.py --task g1_wind --load_run Mar10_18-22-48_ --suite levels --headless  # wind level sweep
-python legged_gym/g1_wind_test/eval_wind_robustness.py --task g1_wind --load_run Mar10_18-22-48_ --test_level 5 --headless  # all suites at L5
-# A/B comparison between two policies:
-python legged_gym/g1_wind_test/eval_wind_robustness.py --task g1_wind --load_run Mar10_18-22-48_ --load_run2 Feb28_21-36-56_ --headless
-# Save results to JSON:
-python legged_gym/g1_wind_test/eval_wind_robustness.py --task g1_wind --load_run Mar10_18-22-48_ --output results.json --headless
+# play.py parameters:
+#   --wind_level 0-5    Wind curriculum level (default: max)
+#   --wind_angle DEG    Fixed wind direction in degrees (default: random)
+#   --wind_mode MODE    full|steady|turbulent|gusts (default: full)
+#   --ood_pattern PAT   step|periodic|reversal (default: none)
+#   --fix_vx FLOAT      Fixed forward velocity (default: random resampling)
+#   --fix_vy FLOAT      Fixed lateral velocity (default: random resampling)
+#   --fix_yaw FLOAT     Fixed heading offset for turning
+#   --num_envs INT      Number of robots (default: 4)
+
+# --- Evaluation (quantitative, all suites: levels/modes/directions/ou/ood/commands) ---
+python legged_gym/g1_wind_test/eval_wind_robustness.py --task g1_wind --load_run Mar10_18-22-48_ --headless               # all suites at L3
+python legged_gym/g1_wind_test/eval_wind_robustness.py --task g1_wind --load_run Mar10_18-22-48_ --test_level all --headless  # all suites at L3,4,5
+python legged_gym/g1_wind_test/eval_wind_robustness.py --task g1_wind --load_run Mar10_18-22-48_ --suite levels --headless  # wind level sweep only
+python legged_gym/g1_wind_test/eval_wind_robustness.py --task g1_wind --load_run Mar10_18-22-48_ --suite commands --test_level all --headless  # command variations
+python legged_gym/g1_wind_test/eval_wind_robustness.py --task g1_wind --load_run Mar10_18-22-48_ --suite ood --test_level all --headless  # OOD patterns
+# Save results to JSON with reproducible seed:
+python legged_gym/g1_wind_test/eval_wind_robustness.py --task g1_wind --load_run Mar10_18-22-48_ --output results.json --seed 42 --headless
 
 # --- Smoke test ---
 python legged_gym/g1_wind_test/smoke_test_g1_wind.py
@@ -302,12 +322,14 @@ Available runs: `Feb28_21-36-56_` (Run4, baseline), `Feb28_22-07-25_` (Run5), `M
   - lean_compensation uses effective_direction (real-time, not episode-initial)
   - Per-episode OU parameter randomization (θ, σ, θ_dir, σ_dir sampled from ranges)
   - Comprehensive robustness eval framework: eval_wind_robustness.py
-    - Suite A: wind level sweep
-    - Suite B: wind mode decomposition (steady/turbulent/gusts/full)
+    - Suite A: wind level sweep (L0-L5)
+    - Suite B: wind mode decomposition (steady/turbulent/gusts/full/pure_gusts)
     - Suite C: wind direction tests (front/side/back/diagonal/random)
-    - Suite D: OU parameter extremes (calm/turbulent/locked/erratic)
-    - Suite E: out-of-distribution patterns (step change, periodic)
-    - A/B policy comparison support
+    - Suite D: OU parameter extremes (calm/turbulent/locked/erratic/default)
+    - Suite E: out-of-distribution patterns (step change, periodic, direction reversal)
+    - Suite F: command variations (standing/slow/normal/fast/lateral/turning/headwind/tailwind)
+    - A/B policy comparison support, --seed for reproducibility
+    - Reward component weighted aggregation (bug fix: correct batch-size weighting)
 - [x] Phase 4.7: Wind model v3 — physically accurate aerodynamics
   - P0: Relative velocity (v_wind - v_body) instead of v_wind only (fixes ~40% force error)
   - P1: Direction-dependent projected area: A_front=0.50, A_side=0.22 m² (elliptical projection)
@@ -417,10 +439,13 @@ Available runs: `Feb28_21-36-56_` (Run4, baseline), `Feb28_22-07-25_` (Run5), `M
   - P2: num_mini_batches 8→4 (standard, 65K samples per mini-batch)
   - P3: max_iterations 20000→10000 (smaller network converges faster)
   - Ref: Humanoid-Gym 2024, Walk These Ways 2023, Gait-Conditioned RL
-- [ ] Phase 5: Retrain (Run6), evaluate, compare with Run4/Run5
+- [x] Phase 5: Training — Run8 (best, 2900 iters, reached L5, reward 35.29)
 - [ ] Phase 6: Testing, analysis, visualization, report
-  - Quantitative evaluation (survival rate, tracking accuracy per wind level)
-  - Cross-test: Run4 vs Run5 vs Run6 under same wind conditions
-  - Robustness eval: modes × directions × OU extremes × OOD patterns
-  - Ablation experiments (Exp2/Exp4/Exp5) if needed
-  - Visualization and report
+  - [x] Quantitative evaluation: eval_wind_robustness.py (Suites A-E, L3/L4/L5)
+    - Run8 full eval: 55 scenarios, 50/55 achieve 100% survival
+    - Worst: D5_default_L5 (96% survival), D2_turbulent_L5 (98%, tracking 0.364)
+    - Suite C (directions): all 100% survival, policy fully direction-invariant
+    - Results: test_result_3.10/full_eval_run8.json
+  - [ ] Supplementary eval: Suite F (command variations) + Suite E3 (direction reversal)
+  - [ ] Visual observation: play.py with scenario control (wind level/angle/mode/commands)
+  - [ ] Report and analysis
