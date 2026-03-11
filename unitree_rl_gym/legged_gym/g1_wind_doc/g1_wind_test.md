@@ -101,6 +101,23 @@ Run8 使用 LSTM 策略网络（ActorCriticRecurrent, hidden_size=128），v3.2 
 - 风向对性能无影响（Suite C 全部 100%）
 - 弱点集中在 L5 + 高湍流条件下
 
+## 视觉观察（play.py）
+
+使用 play.py 场景控制参数，逐场景观察 Run8 机器人姿态。
+
+### 站立（fix_vx=0, fix_vy=0）
+- 机器人不会完全静止，会持续小幅踏步并缓慢漂移
+- 这是正常行为：策略训练时始终执行步态周期，没有"静止站立"模式，用动态平衡（持续调整重心）代替静态站立
+- 在强化学习步态策略中普遍存在
+
+### 大风下行走
+- 姿态会向来风方向倾斜，但幅度合理
+- 行走速度几乎不受影响，仍能维持直立行走
+- 倾斜是 lean_compensation 奖励的预期效果：机器人主动向风倾斜以抵抗风力
+- 与定量数据一致（L5 跟踪误差 0.254，退化极小）
+
+---
+
 ### 待补测
 - Suite E3: 风向反转（direction reversal）
 - Suite F: 指令变化（standing/slow/fast/lateral/turning/headwind/tailwind）
