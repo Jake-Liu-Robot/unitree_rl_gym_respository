@@ -1,0 +1,83 @@
+{
+  "metadata": {
+    "policy_a": "Mar10_18-22-48_",
+    "policy_b": null,
+    "suite": "ood",
+    "test_level": 4,
+    "num_episodes": 50,
+    "max_steps": 1000,
+    "num_envs": 64
+  },
+  "results": {
+    "policy_a": {
+      "E1_step": {
+        "survival_rate": 0.98,
+        "survival_se": 0.019798989873223337,
+        "mean_episode_length": 993.4,
+        "std_episode_length": 60.199999999999996,
+        "mean_reward_per_step": 0.04402764853178808,
+        "std_reward_per_step": 0.0020249656585400733,
+        "mean_tracking_error": 0.19586372497208449,
+        "std_tracking_error": 0.032934670135732584,
+        "mean_wind_force_N": 19.41162821047154,
+        "reward_components": {
+          "rew_action_rate": -0.027172702219104394,
+          "rew_action_rate2": -0.006910306001373101,
+          "rew_alive": 0.9952945411205292,
+          "rew_ang_vel_xy": -0.016017749847378582,
+          "rew_base_acc": -0.010019323461165186,
+          "rew_base_height": -0.02629159833304584,
+          "rew_contact": 0.2086304381955415,
+          "rew_contact_no_vel": -0.014164326290483586,
+          "rew_dof_acc": -0.009525926703645382,
+          "rew_dof_pos_limits": -0.00037378930073828087,
+          "rew_dof_vel": -0.017093289701733738,
+          "rew_feet_distance": -0.0006339030369417742,
+          "rew_feet_swing_height": -0.0028369789179123472,
+          "rew_hip_pos": -0.022011756067513488,
+          "rew_lean_compensation": 0.0721552761096973,
+          "rew_lin_vel_z": -0.03286757133901119,
+          "rew_orientation": -0.016092662131995894,
+          "rew_power": -0.01682485584751703,
+          "rew_torques": -0.03336758093792014,
+          "rew_tracking_ang_vel": 0.30551880155690014,
+          "rew_tracking_lin_vel": 0.859207940287888
+        }
+      },
+      "E2_periodic": {
+        "survival_rate": 1.0,
+        "survival_se": 0.0,
+        "mean_episode_length": 1002.0,
+        "std_episode_length": 0.0,
+        "mean_reward_per_step": 0.042717186019806085,
+        "std_reward_per_step": 0.0015978803596683078,
+        "mean_tracking_error": 0.2177266746414398,
+        "std_tracking_error": 0.02571760543054549,
+        "mean_wind_force_N": 10.118399392621006,
+        "reward_components": {
+          "rew_action_rate": -0.027212349697947502,
+          "rew_action_rate2": -0.006998476572334766,
+          "rew_alive": 1.0020134449005127,
+          "rew_ang_vel_xy": -0.018152868375182152,
+          "rew_base_acc": -0.00990367867052555,
+          "rew_base_height": -0.028265774250030518,
+          "rew_contact": 0.20897364616394043,
+          "rew_contact_no_vel": -0.014156877994537354,
+          "rew_dof_acc": -0.01015277486294508,
+          "rew_dof_pos_limits": -0.0001695850514806807,
+          "rew_dof_vel": -0.01789834164083004,
+          "rew_feet_distance": -0.0004429076798260212,
+          "rew_feet_swing_height": -0.0030972077511250973,
+          "rew_hip_pos": -0.02054949291050434,
+          "rew_lean_compensation": 0.01517978310585022,
+          "rew_lin_vel_z": -0.028847936540842056,
+          "rew_orientation": -0.01270364224910736,
+          "rew_power": -0.016904441639780998,
+          "rew_torques": -0.03317868709564209,
+          "rew_tracking_ang_vel": 0.3289143741130829,
+          "rew_tracking_lin_vel": 0.8314483761787415
+        }
+      }
+    }
+  }
+}

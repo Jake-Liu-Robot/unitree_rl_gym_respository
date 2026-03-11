@@ -6,14 +6,18 @@ Tests policy across multiple dimensions:
   B: Wind modes (steady, turbulent, gusts-only, full model)
   C: Wind directions (front, side, back, diagonal, random)
   D: OU parameter extremes (calm, turbulent, locked heading, erratic heading)
-  E: Out-of-distribution wind patterns (step change, periodic)
+  E: Out-of-distribution wind patterns (step change, periodic, direction reversal)
+  F: Command variations (standing, slow/fast walk, lateral, turning, head/tailwind)
 
 Usage:
-    # Run all suites (default level 3 for B-E)
+    # Run all suites at L3,L4,L5 (comprehensive test)
+    python eval_wind_robustness.py --task g1_wind --load_run Mar10_18-22-48_ --test_level all --headless
+
+    # Run all suites at default level 3 only
     python eval_wind_robustness.py --task g1_wind --load_run Mar10_18-22-48_ --headless
 
-    # Run specific suite at level 5
-    python eval_wind_robustness.py --task g1_wind --load_run Mar10_18-22-48_ --suite levels --headless
+    # Run specific suite at specific levels
+    python eval_wind_robustness.py --task g1_wind --load_run Mar10_18-22-48_ --suite modes --test_level 4,5 --headless
 
     # Compare two policies
     python eval_wind_robustness.py --task g1_wind --load_run Mar10_18-22-48_ --load_run2 Feb28_21-36-56_ --headless
@@ -29,6 +33,7 @@ import os
 import json
 import argparse
 import math
+from isaacgym.torch_utils import quat_apply
 from legged_gym.envs import *
 from legged_gym.utils import task_registry, get_args, get_load_path, class_to_dict
 from rsl_rl.runners import OnPolicyRunner
@@ -71,9 +76,32 @@ OU_EXTREMES = {
 }
 
 # E: Out-of-distribution patterns
+# Wind speeds are scaled to the test level's curriculum range at runtime.
 OOD_PATTERNS = {
-    "E1_step":     {"label": "Step change (0→10 m/s at t=5s)"},
-    "E2_periodic": {"label": "Periodic (A·sin(ωt), T=4s)"},
+    "E1_step":     {"label_fmt": "Step change (0\u2192{peak:.0f} m/s at t=5s)"},
+    "E2_periodic": {"label_fmt": "Periodic ({lo:.0f}-{hi:.0f} m/s, T=4s)"},
+    "E3_reversal": {"label_fmt": "Dir reversal (180\u00b0 at t=5s, {peak:.0f} m/s)"},
+}
+
+# F: Command variations — fixed velocity commands under wind
+# All within training range: vx,vy ~ U[-1,1], yaw from heading, resampled every 10s
+COMMAND_SCENARIOS = {
+    "F1_standing":   {"vx": 0.0, "vy": 0.0,
+                      "label": "Standing (cmd=0)"},
+    "F2_slow_fwd":   {"vx": 0.3, "vy": 0.0,
+                      "label": "Slow forward (0.3)"},
+    "F3_normal_fwd": {"vx": 0.6, "vy": 0.0,
+                      "label": "Normal forward (0.6)"},
+    "F4_fast_fwd":   {"vx": 1.0, "vy": 0.0,
+                      "label": "Fast forward (1.0)"},
+    "F5_lateral":    {"vx": 0.0, "vy": 0.5,
+                      "label": "Lateral walk (vy=0.5)"},
+    "F6_turning":    {"vx": 0.5, "vy": 0.0, "heading_offset": 1.0,
+                      "label": "Turning (vx=0.5+yaw)"},
+    "F7_headwind":   {"vx": 0.5, "vy": 0.0, "wind_angle": math.pi,
+                      "label": "Headwind walk"},
+    "F8_tailwind":   {"vx": 0.5, "vy": 0.0, "wind_angle": 0.0,
+                      "label": "Tailwind walk"},
 }
 
 
@@ -100,13 +128,29 @@ def load_policy(env, train_cfg, load_run, checkpoint, device):
     return policy, actor_critic
 
 
+def _apply_fixed_commands(env, fix_commands):
+    """Override velocity commands for fixed-command evaluation.
+
+    Sets vx, vy directly. For turning (heading_offset), continuously
+    sets target heading ahead of current heading to produce constant yaw.
+    For non-turning, heading_command mode auto-maintains initial heading.
+    """
+    env.commands[:, 0] = fix_commands["vx"]
+    env.commands[:, 1] = fix_commands["vy"]
+    if "heading_offset" in fix_commands:
+        forward = quat_apply(env.base_quat, env.forward_vec)
+        cur_heading = torch.atan2(forward[:, 1], forward[:, 0])
+        env.commands[:, 3] = cur_heading + fix_commands["heading_offset"]
+
+
 # ============================================================
 # Core Evaluation Function
 # ============================================================
 
 def evaluate_scenario(env, policy, wind_level, num_episodes=50, max_steps=1000,
                       fix_direction=None, mode_overrides=None, ou_overrides=None,
-                      ood_pattern=None, actor_critic=None):
+                      ood_pattern=None, ood_peak_speed=10.0, actor_critic=None,
+                      fix_commands=None):
     """Run evaluation under a specific wind scenario.
 
     Args:
@@ -118,12 +162,17 @@ def evaluate_scenario(env, policy, wind_level, num_episodes=50, max_steps=1000,
         fix_direction: fixed wind angle (rad) or None for random
         mode_overrides: dict with keys ou_speed/ou_dir/gusts (bool) to enable/disable layers
         ou_overrides: dict with keys theta/sigma/theta_dir/sigma_dir to override OU params
-        ood_pattern: "step" or "periodic" for out-of-distribution wind
+        ood_pattern: "step", "periodic", or "reversal" for out-of-distribution wind
+        ood_peak_speed: peak wind speed for OOD patterns (m/s), scales with test level
         actor_critic: ActorCriticRecurrent module for LSTM hidden state reset
+        fix_commands: dict with vx, vy [, heading_offset] to override velocity commands
 
     Returns:
         dict with evaluation metrics including per-component reward breakdown
     """
+    # Derived OOD speeds from peak
+    ood_mid_speed = ood_peak_speed / 2.0
+    ood_amp_speed = ood_peak_speed / 2.0
     device = env.device
     num_envs = env.num_envs
     wind_model = env.wind_model
@@ -178,6 +227,16 @@ def evaluate_scenario(env, policy, wind_level, num_episodes=50, max_steps=1000,
 
     obs = env.get_observations()
 
+    # --- Apply fixed commands: disable resampling + override ---
+    saved_resample = None
+    if fix_commands is not None:
+        saved_resample = env._resample_commands
+        env._resample_commands = lambda env_ids: None  # no-op
+        _apply_fixed_commands(env, fix_commands)
+        env.compute_observations()
+        clip_obs = env.cfg.normalization.clip_observations
+        obs = torch.clip(env.obs_buf, -clip_obs, clip_obs)
+
     # Initialize LSTM hidden states (first forward pass) then reset
     if actor_critic is not None:
         with torch.no_grad():
@@ -192,6 +251,9 @@ def evaluate_scenario(env, policy, wind_level, num_episodes=50, max_steps=1000,
     episodes_collected = 0
 
     # Per-component reward tracking (from env.extras["episode"])
+    # Each entry is (snapshot_dict, weight) where weight = number of done envs
+    # in that step. extras["episode"]["rew_*"] is already batch-averaged, so we
+    # need weighted aggregation to avoid over-counting small batches.
     rew_component_samples = []
 
     ep_len = torch.zeros(num_envs, device=device)
@@ -206,22 +268,41 @@ def evaluate_scenario(env, policy, wind_level, num_episodes=50, max_steps=1000,
     step = 0
     while episodes_collected < num_episodes:
         # --- OOD pattern: override wind model state using per-env episode time ---
+        # Wind speeds scale to the test level's curriculum max speed
         if ood_pattern == "step":
             t = ep_step * dt_control
             wind_model.base_speed = torch.where(
                 t < 5.0,
                 torch.zeros_like(t),
-                torch.full_like(t, 10.0)
+                torch.full_like(t, ood_peak_speed)
             )
         elif ood_pattern == "periodic":
             t = ep_step * dt_control
-            wind_model.base_speed = 5.0 + 5.0 * torch.sin(2 * math.pi / 4.0 * t)
+            wind_model.base_speed = ood_mid_speed + ood_amp_speed * torch.sin(2 * math.pi / 4.0 * t)
+        elif ood_pattern == "reversal":
+            # Direction flips 180 deg at t=5s, speed stays constant
+            t = ep_step * dt_control
+            angle = torch.where(t < 5.0, torch.zeros_like(t),
+                                torch.full_like(t, math.pi))
+            wind_model.base_speed[:] = ood_peak_speed
+            wind_model.base_angle[:] = angle
+            wind_model.base_direction[:, 0] = torch.cos(angle)
+            wind_model.base_direction[:, 1] = torch.sin(angle)
+            wind_model.base_direction[:, 2] = 0.0
 
         with torch.no_grad():
             actions = policy(obs.detach())
         obs, _, rews, dones, infos = env.step(actions.detach())
 
         ep_step += 1
+
+        # --- Override commands after step (resampling is no-op, but
+        #     heading_command mode recomputed yaw inside step) ---
+        if fix_commands is not None:
+            _apply_fixed_commands(env, fix_commands)
+            env.compute_observations()
+            clip_obs = env.cfg.normalization.clip_observations
+            obs = torch.clip(env.obs_buf, -clip_obs, clip_obs)
 
         # Reset LSTM hidden states for terminated envs
         if actor_critic is not None and dones.any():
@@ -242,15 +323,15 @@ def evaluate_scenario(env, policy, wind_level, num_episodes=50, max_steps=1000,
         done_ids = dones.nonzero(as_tuple=False).flatten()
         if len(done_ids) > 0:
             # Capture per-component rewards from extras (set in env.reset_idx)
+            # extras["episode"]["rew_*"] is batch-averaged over done envs,
+            # so store once with weight = batch size for correct aggregation.
             if "episode" in env.extras:
                 snapshot = {}
                 for key, val in env.extras["episode"].items():
                     if key.startswith("rew_"):
                         snapshot[key] = val.item() if isinstance(val, torch.Tensor) else val
                 if snapshot:
-                    n_done = len(done_ids)
-                    for _ in range(n_done):
-                        rew_component_samples.append(snapshot)
+                    rew_component_samples.append((snapshot, len(done_ids)))
 
             for idx in done_ids:
                 i = idx.item()
@@ -309,6 +390,8 @@ def evaluate_scenario(env, policy, wind_level, num_episodes=50, max_steps=1000,
     env.cfg.wind.ou_randomize = saved_ou_randomize
     wind_model.disable_ou = saved_disable_ou
     wind_model.disable_gusts = saved_disable_gusts
+    if saved_resample is not None:
+        env._resample_commands = saved_resample
 
     episode_lengths = np.array(episode_lengths[:num_episodes])
     episode_rewards = np.array(episode_rewards[:num_episodes])
@@ -320,15 +403,16 @@ def evaluate_scenario(env, policy, wind_level, num_episodes=50, max_steps=1000,
     survival_rate = float(np.mean(episode_lengths >= max_steps))
     survival_se = float(np.sqrt(survival_rate * (1 - survival_rate) / max(n, 1)))
 
-    # Aggregate reward components
+    # Aggregate reward components (weighted by batch size)
     reward_components = {}
     if rew_component_samples:
         all_keys = set()
-        for s in rew_component_samples:
+        for s, w in rew_component_samples:
             all_keys.update(s.keys())
+        total_weight = sum(w for _, w in rew_component_samples)
         for key in sorted(all_keys):
-            vals = [s.get(key, 0.0) for s in rew_component_samples]
-            reward_components[key] = float(np.mean(vals))
+            weighted_sum = sum(s.get(key, 0.0) * w for s, w in rew_component_samples)
+            reward_components[key] = float(weighted_sum / total_weight)
 
     return {
         "survival_rate": survival_rate,
@@ -409,20 +493,53 @@ def run_suite_ou_extremes(env, policy, args, test_level=3, actor_critic=None):
 
 
 def run_suite_ood(env, policy, args, test_level=3, actor_critic=None):
-    """Suite E: Out-of-distribution wind patterns."""
+    """Suite E: Out-of-distribution wind patterns scaled to test level."""
     print_header(f"Suite E: Out-of-Distribution Patterns (Level {test_level})")
+
+    # Scale OOD peak speed to the test level's curriculum max
+    curriculum_levels = env.cfg.wind.curriculum_levels
+    if test_level < len(curriculum_levels):
+        peak_speed = curriculum_levels[test_level][1]  # max speed for this level
+    else:
+        peak_speed = 18.0  # fallback to L5 max
+    # Ensure minimum of 10 m/s so low levels still test something meaningful
+    peak_speed = max(peak_speed, 10.0)
+
     results = {}
     for key, p in OOD_PATTERNS.items():
         pattern_name = key.split("_")[1]  # "step" or "periodic"
+        # Generate dynamic label
+        if pattern_name == "step" or pattern_name == "reversal":
+            label = p["label_fmt"].format(peak=peak_speed)
+        else:
+            label = p["label_fmt"].format(lo=0, hi=peak_speed)
         r = evaluate_scenario(env, policy, test_level,
                               num_episodes=args.num_episodes, max_steps=args.max_steps,
                               fix_direction=0.0,
                               mode_overrides={"ou_speed": False, "ou_dir": False, "gusts": False},
-                              ood_pattern=pattern_name, actor_critic=actor_critic)
+                              ood_pattern=pattern_name, ood_peak_speed=peak_speed,
+                              actor_critic=actor_critic)
         results[key] = r
-        print_row(key, p["label"], r)
+        print_row(key, label, r)
     return results
 
+
+
+def run_suite_commands(env, policy, args, test_level=3, actor_critic=None):
+    """Suite F: Command variations at a fixed wind level (full wind model)."""
+    print_header(f"Suite F: Command Variations (Level {test_level})")
+    results = {}
+    for key, scenario in COMMAND_SCENARIOS.items():
+        fix_cmds = {k: scenario[k] for k in scenario
+                    if k not in ("label", "wind_angle")}
+        fix_dir = scenario.get("wind_angle", None)
+        r = evaluate_scenario(env, policy, test_level,
+                              num_episodes=args.num_episodes, max_steps=args.max_steps,
+                              fix_commands=fix_cmds, fix_direction=fix_dir,
+                              actor_critic=actor_critic)
+        results[key] = r
+        print_row(key, scenario["label"], r)
+    return results
 
 
 # ============================================================
@@ -503,21 +620,35 @@ def save_results_json(all_results, output_path, metadata=None):
 # ============================================================
 
 def main():
-    args = get_args()
-
+    # Pre-extract eval-specific args before get_args() (which uses strict parsing)
     eval_parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
     eval_parser.add_argument("--suite", type=str, default="all",
-                             choices=["all", "levels", "modes", "directions", "ou", "ood"],
+                             choices=["all", "levels", "modes", "directions", "ou", "ood", "commands"],
                              help="Which test suite to run")
-    eval_parser.add_argument("--test_level", type=int, default=3,
-                             help="Wind level for single-level suites (B/C/D/E)")
+    eval_parser.add_argument("--test_level", type=str, default="3",
+                             help="Wind level(s) for B/C/D/E: single int, comma-separated, or 'all' for 3,4,5")
     eval_parser.add_argument("--num_episodes", type=int, default=50)
     eval_parser.add_argument("--max_steps", type=int, default=1000)
     eval_parser.add_argument("--load_run2", type=str, default=None,
                              help="Second policy for A/B comparison")
     eval_parser.add_argument("--output", type=str, default=None,
                              help="Output JSON file path for results")
-    eval_args, _ = eval_parser.parse_known_args()
+    eval_parser.add_argument("--seed", type=int, default=None,
+                             help="Random seed for reproducibility")
+    eval_args, remaining_argv = eval_parser.parse_known_args()
+
+    # Patch sys.argv so get_args() only sees arguments it recognizes
+    import sys
+    sys.argv = [sys.argv[0]] + remaining_argv
+
+    args = get_args()
+
+    # --- Set random seed for reproducibility ---
+    if eval_args.seed is not None:
+        torch.manual_seed(eval_args.seed)
+        np.random.seed(eval_args.seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(eval_args.seed)
 
     # --- Create environment ---
     env_cfg, train_cfg = task_registry.get_cfgs(name="g1_wind")
@@ -543,35 +674,54 @@ def main():
     policy, actor_critic = load_policy(env, train_cfg, load_run, checkpoint, args.rl_device)
     print(f"\nEvaluating policy: {load_run}")
 
-    # --- Run selected suites ---
+    # --- Parse test levels ---
     suite = eval_args.suite
-    tl = eval_args.test_level
+    tl_str = eval_args.test_level
+    if tl_str == "all":
+        test_levels = [3, 4, 5]
+    else:
+        test_levels = [int(x) for x in tl_str.split(",")]
+
     all_results = {}
 
+    # Suite A: always a full level sweep (ignores test_level)
     if suite in ("all", "levels"):
         results = run_suite_levels(env, policy, eval_args, actor_critic=actor_critic)
         all_results.update(results)
         print_reward_breakdown(results)
 
-    if suite in ("all", "modes"):
-        results = run_suite_modes(env, policy, eval_args, tl, actor_critic=actor_critic)
-        all_results.update(results)
-        print_reward_breakdown(results)
+    # Suites B-E: run at each requested test level
+    for tl in test_levels:
+        if suite in ("all", "modes"):
+            results = run_suite_modes(env, policy, eval_args, tl, actor_critic=actor_critic)
+            # Prefix keys with level for uniqueness
+            results = {f"{k}_L{tl}": v for k, v in results.items()}
+            all_results.update(results)
+            print_reward_breakdown(results)
 
-    if suite in ("all", "directions"):
-        results = run_suite_directions(env, policy, eval_args, tl, actor_critic=actor_critic)
-        all_results.update(results)
-        print_reward_breakdown(results)
+        if suite in ("all", "directions"):
+            results = run_suite_directions(env, policy, eval_args, tl, actor_critic=actor_critic)
+            results = {f"{k}_L{tl}": v for k, v in results.items()}
+            all_results.update(results)
+            print_reward_breakdown(results)
 
-    if suite in ("all", "ou"):
-        results = run_suite_ou_extremes(env, policy, eval_args, tl, actor_critic=actor_critic)
-        all_results.update(results)
-        print_reward_breakdown(results)
+        if suite in ("all", "ou"):
+            results = run_suite_ou_extremes(env, policy, eval_args, tl, actor_critic=actor_critic)
+            results = {f"{k}_L{tl}": v for k, v in results.items()}
+            all_results.update(results)
+            print_reward_breakdown(results)
 
-    if suite in ("all", "ood"):
-        results = run_suite_ood(env, policy, eval_args, tl, actor_critic=actor_critic)
-        all_results.update(results)
-        print_reward_breakdown(results)
+        if suite in ("all", "ood"):
+            results = run_suite_ood(env, policy, eval_args, tl, actor_critic=actor_critic)
+            results = {f"{k}_L{tl}": v for k, v in results.items()}
+            all_results.update(results)
+            print_reward_breakdown(results)
+
+        if suite in ("all", "commands"):
+            results = run_suite_commands(env, policy, eval_args, tl, actor_critic=actor_critic)
+            results = {f"{k}_L{tl}": v for k, v in results.items()}
+            all_results.update(results)
+            print_reward_breakdown(results)
 
     print(f"\n{'='*105}")
     print(f"  Completed {len(all_results)} test scenarios for {load_run}")
@@ -587,23 +737,31 @@ def main():
 
         if suite in ("all", "levels"):
             all_results2.update(run_suite_levels(env, policy2, eval_args, actor_critic=actor_critic2))
-        if suite in ("all", "modes"):
-            all_results2.update(run_suite_modes(env, policy2, eval_args, tl, actor_critic=actor_critic2))
-        if suite in ("all", "directions"):
-            all_results2.update(run_suite_directions(env, policy2, eval_args, tl, actor_critic=actor_critic2))
-        if suite in ("all", "ou"):
-            all_results2.update(run_suite_ou_extremes(env, policy2, eval_args, tl, actor_critic=actor_critic2))
-        if suite in ("all", "ood"):
-            all_results2.update(run_suite_ood(env, policy2, eval_args, tl, actor_critic=actor_critic2))
+        for tl in test_levels:
+            if suite in ("all", "modes"):
+                r = run_suite_modes(env, policy2, eval_args, tl, actor_critic=actor_critic2)
+                all_results2.update({f"{k}_L{tl}": v for k, v in r.items()})
+            if suite in ("all", "directions"):
+                r = run_suite_directions(env, policy2, eval_args, tl, actor_critic=actor_critic2)
+                all_results2.update({f"{k}_L{tl}": v for k, v in r.items()})
+            if suite in ("all", "ou"):
+                r = run_suite_ou_extremes(env, policy2, eval_args, tl, actor_critic=actor_critic2)
+                all_results2.update({f"{k}_L{tl}": v for k, v in r.items()})
+            if suite in ("all", "ood"):
+                r = run_suite_ood(env, policy2, eval_args, tl, actor_critic=actor_critic2)
+                all_results2.update({f"{k}_L{tl}": v for k, v in r.items()})
+            if suite in ("all", "commands"):
+                r = run_suite_commands(env, policy2, eval_args, tl, actor_critic=actor_critic2)
+                all_results2.update({f"{k}_L{tl}": v for k, v in r.items()})
 
         # Print comparison
         print(f"\n{'='*105}")
         print(f"  Comparison: {load_run} (A) vs {eval_args.load_run2} (B)")
         print(f"{'='*105}")
-        print(f"{'Scenario':>20} {'Surv A':>10} {'Surv B':>10} {'Delta':>10} "
+        print(f"{'Scenario':>25} {'Surv A':>10} {'Surv B':>10} {'Delta':>10} "
               f"{'Track A':>10} {'Track B':>10}")
-        print(f"{'-'*75}")
-        for key in all_results:
+        print(f"{'-'*85}")
+        for key in sorted(all_results.keys()):
             if key in all_results2:
                 sa = all_results[key]["survival_rate"] * 100
                 sb = all_results2[key]["survival_rate"] * 100
@@ -611,7 +769,7 @@ def main():
                 ta = all_results[key]["mean_tracking_error"]
                 tb = all_results2[key]["mean_tracking_error"]
                 sign = "+" if delta >= 0 else ""
-                print(f"{key:>20} {sa:>9.1f}% {sb:>9.1f}% {sign}{delta:>8.1f}% "
+                print(f"{key:>25} {sa:>9.1f}% {sb:>9.1f}% {sign}{delta:>8.1f}% "
                       f"{ta:>10.4f} {tb:>10.4f}")
 
     # --- Save results to JSON ---
@@ -620,7 +778,7 @@ def main():
             "policy_a": load_run,
             "policy_b": eval_args.load_run2,
             "suite": suite,
-            "test_level": tl,
+            "test_levels": test_levels,
             "num_episodes": eval_args.num_episodes,
             "max_steps": eval_args.max_steps,
             "num_envs": env.num_envs,
