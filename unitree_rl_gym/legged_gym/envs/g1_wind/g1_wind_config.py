@@ -263,3 +263,28 @@ class G1WindRoughCfgPPO(G1RoughCfgPPO):
                                     # 64 steps × 0.02s/step = 1.28s (sim.dt=0.005 × decimation=4)
         run_name = ''
         experiment_name = 'g1_wind'
+
+
+# ============================================================
+# Experiment variants (ablation studies)
+# ============================================================
+
+class G1WindBaselineCfg(G1WindRoughCfg):
+    """Exp1: No-wind baseline. Same architecture/rewards/DR as Run8, only wind disabled."""
+
+    class env(G1WindRoughCfg.env):
+        num_observations = 47
+        num_privileged_obs = 50     # no wind channels (was 56)
+        num_actions = 12
+        episode_length_s = 20
+
+    class wind(G1WindRoughCfg.wind):
+        enable = False
+
+
+class G1WindBaselineCfgPPO(G1WindRoughCfgPPO):
+    """PPO config for baseline (identical to wind-trained)."""
+
+    class runner(G1WindRoughCfgPPO.runner):
+        experiment_name = 'g1_wind_baseline'
+        max_iterations = 3000

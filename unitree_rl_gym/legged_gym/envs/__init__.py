@@ -8,6 +8,7 @@ from legged_gym.envs.h1_2.h1_2_env import H1_2Robot
 from legged_gym.envs.g1.g1_config import G1RoughCfg, G1RoughCfgPPO
 from legged_gym.envs.g1.g1_env import G1Robot
 from legged_gym.envs.g1_wind.g1_wind_config import G1WindRoughCfg, G1WindRoughCfgPPO
+from legged_gym.envs.g1_wind.g1_wind_config import G1WindBaselineCfg, G1WindBaselineCfgPPO
 from legged_gym.envs.g1_wind.g1_wind_env import G1WindRobot
 from .base.legged_robot import LeggedRobot
 
@@ -18,3 +19,4 @@ task_registry.register( "h1", H1Robot, H1RoughCfg(), H1RoughCfgPPO())
 task_registry.register( "h1_2", H1_2Robot, H1_2RoughCfg(), H1_2RoughCfgPPO())
 task_registry.register( "g1", G1Robot, G1RoughCfg(), G1RoughCfgPPO())
 task_registry.register( "g1_wind", G1WindRobot, G1WindRoughCfg(), G1WindRoughCfgPPO())
+task_registry.register( "g1_wind_baseline", G1WindRobot, G1WindBaselineCfg(), G1WindBaselineCfgPPO())

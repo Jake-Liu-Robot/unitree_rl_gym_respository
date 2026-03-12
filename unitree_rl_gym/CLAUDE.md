@@ -258,7 +258,7 @@ python legged_gym/g1_wind_test/smoke_test_g1_wind.py
 
 Note: `play.py` requires `--load_run <run_dir>` to locate the model. Without it will raise FileNotFoundError.
 
-Available runs: `Feb28_21-36-56_` (Run4, baseline), `Feb28_22-07-25_` (Run5), `Mar02_21-49-27_` (Run6), `Mar10_12-07-00_` (Run7, aborted), `Mar10_18-22-48_` (Run8, best)
+Available runs: `Feb28_21-36-56_` (Run4, baseline), `Mar10_18-22-48_` (Run8, best)
 
 ## Coding Conventions
 - Inherit from existing classes — don't rewrite base code
@@ -272,19 +272,11 @@ Available runs: `Feb28_21-36-56_` (Run4, baseline), `Feb28_22-07-25_` (Run5), `M
 | Run | Directory | Iters | Curriculum | mean_reward | mean_ep_len | Role |
 |-----|-----------|-------|------------|-------------|-------------|------|
 | Run4 | Feb28_21-36-56_ | 1950 | Level 0 (no wind) | 21.25 | 980 | Baseline (Exp1) |
-| Run5 | Feb28_22-07-25_ | 1500 | Level 4 (strong) | 1.71 | 290 | Wind-trained (Exp3, early) |
-| Run6 | Mar02_21-49-27_ | 3750 | Level 3 (medium) | 10.98 | 643 | Wind-trained (Exp3, v2) |
-| Run7 | Mar10_12-07-00_ | 200 | Level 0 (no wind) | 15.28 | 691 | Aborted early |
 | Run8 | Mar10_18-22-48_ | 2900 | Level 5 (extreme) | 35.29 | 997 | **Best wind-trained (Exp3)** |
 
 - Run4: curriculum never advanced, effectively a no-wind baseline. Good tracking (0.84), long episodes.
-- Run5: curriculum reached level 4 (7-12 m/s). Shorter episodes under wind, tracking degraded (0.13).
-- Run6: reached level 3, moderate reward. Trained with v2 wind model + early reward design.
-- Run7: aborted early (only 200 iters), curriculum never advanced.
 - Run8: **best result** — reached max curriculum level 5 (extreme, 10-18 m/s), reward 35.29, near-max episode length (997/1000). Trained with v3.2 wind physics + Phase 4.14 reward/network/PPO config.
 - Exported LSTM policy: `logs/g1_wind/exported/policies/policy_lstm_1.pt`
-- Baseline G1 (no wind env): `logs/g1/Feb20_16-37-13_/` (only model_0.pt, 1 iter)
-- Early aborted runs: Feb28_21-29-05_, Feb28_21-31-16_, Feb28_21-33-53_ (only model_0.pt each)
 
 ## Caveats
 - `self.phase` only exists after first `step()` call (created in `_post_physics_step_callback`)
