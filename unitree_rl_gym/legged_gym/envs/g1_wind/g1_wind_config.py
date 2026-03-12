@@ -57,6 +57,10 @@ class G1WindRoughCfg(G1RoughCfg):
         stance_ratio_base = 0.55           # base stance phase ratio
         stance_ratio_wind_increase = 0.20  # max increase at peak wind (0.55→0.75)
 
+        # Enable wind-adaptive reward modifiers (orientation, base_height, contact, swing_height)
+        # Set False in ablation experiments to isolate wind-specific reward contributions
+        wind_adaptive_rewards = True
+
         # Wind-adaptive orientation: scale at which orientation penalty halves (N)
         # 1/(1 + F/F_ref): at 50N → 50%, at 100N → 33%, smooth & never fully zero
         orientation_wind_scale = 50.0
@@ -290,6 +294,48 @@ class G1WindBaselineCfgPPO(G1WindRoughCfgPPO):
         max_iterations = 3000
 
 
+class G1WindPushOnlyCfg(G1WindRoughCfg):
+    """Exp2: Push-only perturbation (traditional baseline). No wind, standard velocity
+    impulse push instead. Tests whether generic impulse robustness transfers to wind.
+    Push params from G1 default config (g1_config.py), consistent with sim-to-real
+    locomotion literature (Walk These Ways, ANYmal, legged_gym)."""
+
+    class env(G1WindRoughCfg.env):
+        num_observations = 47
+        num_privileged_obs = 50     # no wind channels (was 56)
+        num_actions = 12
+        episode_length_s = 20
+
+    class wind(G1WindRoughCfg.wind):
+        enable = False
+
+    class domain_rand(G1WindRoughCfg.domain_rand):
+        # Enable push perturbation (G1 default parameters)
+        push_robots = True
+        push_interval_s = 5        # push every 5 seconds
+        max_push_vel_xy = 1.5      # m/s (G1 default, ~52.5 N·s impulse on 35kg robot)
+        # Keep all other domain randomization identical to Exp3
+        randomize_friction = True
+        friction_range = [0.1, 1.25]
+        randomize_base_mass = True
+        added_mass_range = [-1., 3.]
+        randomize_action_delay = True
+        action_delay_range = [0, 2]
+        randomize_pd_gains = True
+        stiffness_multiplier_range = [0.8, 1.2]
+        damping_multiplier_range = [0.8, 1.2]
+        randomize_motor_strength = True
+        motor_strength_range = [0.8, 1.0]
+
+
+class G1WindPushOnlyCfgPPO(G1WindRoughCfgPPO):
+    """PPO config for push-only baseline."""
+
+    class runner(G1WindRoughCfgPPO.runner):
+        experiment_name = 'g1_wind_push_only'
+        max_iterations = 3000
+
+
 class G1WindNoCurriculumCfg(G1WindRoughCfg):
     """Exp4: Wind ON but fixed at L3 (medium, 4-8 m/s). No curriculum advancement."""
 
@@ -310,6 +356,11 @@ class G1WindNoCurriculumCfgPPO(G1WindRoughCfgPPO):
 class G1WindNoRewardCfg(G1WindRoughCfg):
     """Exp5: Wind ON + curriculum ON, but wind-specific rewards disabled.
     Tests whether base rewards alone can learn wind robustness."""
+
+    class wind(G1WindRoughCfg.wind):
+        # Disable wind-adaptive modifiers in overridden reward functions
+        # (orientation, base_height, contact, feet_swing_height)
+        wind_adaptive_rewards = False
 
     class rewards(G1WindRoughCfg.rewards):
         # Disable wind-adaptive tracking sigma

@@ -105,8 +105,14 @@ COMMAND_SCENARIOS = {
 }
 
 
-def load_policy(env, train_cfg, load_run, checkpoint, device):
+def load_policy(env, train_cfg, load_run, checkpoint, device, model_experiment=None):
     """Load a trained policy from a specific run.
+
+    Args:
+        model_experiment: override experiment directory name for model loading.
+            When evaluating a baseline model in the g1_wind env, the critic
+            dimensions won't match; strict=False is used automatically so that
+            only the actor weights (which share the same architecture) are loaded.
 
     Returns:
         (policy_fn, actor_critic): inference policy callable and the
@@ -116,13 +122,39 @@ def load_policy(env, train_cfg, load_run, checkpoint, device):
     train_cfg_dict = class_to_dict(train_cfg)
     runner = OnPolicyRunner(env, train_cfg_dict, log_dir=None, device=device)
 
+    experiment_name = model_experiment or train_cfg.runner.experiment_name
     log_root = os.path.join(
         os.path.dirname(os.path.abspath(__file__)),
-        '..', '..', 'logs', train_cfg.runner.experiment_name
+        '..', '..', 'logs', experiment_name
     )
     resume_path = get_load_path(log_root, load_run=load_run, checkpoint=checkpoint)
     print(f"Loading model from: {resume_path}")
-    runner.load(resume_path, load_optimizer=False)
+
+    # When loading cross-experiment (e.g. baseline model into g1_wind env),
+    # critic dimensions may differ. Filter out size-mismatched keys and load
+    # only compatible weights (actor weights share the same architecture).
+    loaded_dict = torch.load(resume_path)
+    saved_state = loaded_dict['model_state_dict']
+    if model_experiment and model_experiment != train_cfg.runner.experiment_name:
+        model_state = runner.alg.actor_critic.state_dict()
+        compatible_state = {}
+        skipped = []
+        for k, v in saved_state.items():
+            if k in model_state and v.shape == model_state[k].shape:
+                compatible_state[k] = v
+            else:
+                skipped.append(k)
+        missing, unexpected = runner.alg.actor_critic.load_state_dict(
+            compatible_state, strict=False
+        )
+        print(f"  Cross-experiment load: {len(compatible_state)} params loaded, "
+              f"{len(skipped)} skipped (size mismatch)")
+        if skipped:
+            print(f"    Skipped: {skipped}")
+    else:
+        runner.alg.actor_critic.load_state_dict(saved_state)
+    runner.current_learning_iteration = loaded_dict['iter']
+
     policy = runner.get_inference_policy(device=device)
     actor_critic = runner.alg.actor_critic
     return policy, actor_critic
@@ -175,31 +207,31 @@ def evaluate_scenario(env, policy, wind_level, num_episodes=50, max_steps=1000,
     ood_amp_speed = ood_peak_speed / 2.0
     device = env.device
     num_envs = env.num_envs
-    wind_model = env.wind_model
+    has_wind = hasattr(env, 'wind_model')
+    wind_model = env.wind_model if has_wind else None
 
     # Force wind level and freeze curriculum
-    env.wind_curriculum_level[:] = wind_level
-    saved_upgrade_window = env.cfg.wind.upgrade_window
-    env.cfg.wind.upgrade_window = 999999
+    if has_wind:
+        env.wind_curriculum_level[:] = wind_level
+        saved_upgrade_window = env.cfg.wind.upgrade_window
+        env.cfg.wind.upgrade_window = 999999
 
-    # Save original config for restoration
-    saved_ou_randomize = env.cfg.wind.ou_randomize
-    saved_disable_ou = wind_model.disable_ou
-    saved_disable_gusts = wind_model.disable_gusts
+        # Save original config for restoration
+        saved_ou_randomize = env.cfg.wind.ou_randomize
+        saved_disable_ou = wind_model.disable_ou
+        saved_disable_gusts = wind_model.disable_gusts
 
-    # --- Apply mode overrides via wind model flags (clean substep-level disable) ---
-    # Note: disable_ou controls both speed and direction OU together.
-    # All current test scenarios use them as a pair (both on or both off).
-    if mode_overrides:
-        wind_model.disable_ou = (
-            not mode_overrides.get("ou_speed", True)
-            and not mode_overrides.get("ou_dir", True)
-        )
-        wind_model.disable_gusts = not mode_overrides.get("gusts", True)
+        # --- Apply mode overrides via wind model flags (clean substep-level disable) ---
+        if mode_overrides:
+            wind_model.disable_ou = (
+                not mode_overrides.get("ou_speed", True)
+                and not mode_overrides.get("ou_dir", True)
+            )
+            wind_model.disable_gusts = not mode_overrides.get("gusts", True)
 
-    # --- Apply OU overrides (disable randomization, set fixed params) ---
-    if ou_overrides:
-        env.cfg.wind.ou_randomize = False
+        # --- Apply OU overrides (disable randomization, set fixed params) ---
+        if ou_overrides:
+            env.cfg.wind.ou_randomize = False
 
     # Reset all envs
     env.reset_buf[:] = 1
@@ -207,7 +239,7 @@ def evaluate_scenario(env, policy, wind_level, num_episodes=50, max_steps=1000,
     env.reset_idx(env_ids)
 
     # Apply fixed direction if specified
-    if fix_direction is not None:
+    if has_wind and fix_direction is not None:
         wind_model.base_angle[:] = fix_direction
         wind_model.base_direction[:, 0] = math.cos(fix_direction)
         wind_model.base_direction[:, 1] = math.sin(fix_direction)
@@ -215,11 +247,11 @@ def evaluate_scenario(env, policy, wind_level, num_episodes=50, max_steps=1000,
         wind_model.effective_direction[:] = wind_model.base_direction[:]
 
     # Apply fixed base_speed override (for B5_pure_gusts)
-    if mode_overrides and "base_speed_override" in mode_overrides:
+    if has_wind and mode_overrides and "base_speed_override" in mode_overrides:
         wind_model.base_speed[:] = mode_overrides["base_speed_override"]
 
     # Apply OU param overrides
-    if ou_overrides:
+    if has_wind and ou_overrides:
         wind_model.env_ou_theta[:] = ou_overrides["theta"]
         wind_model.env_ou_sigma[:] = ou_overrides["sigma"]
         wind_model.env_ou_theta_dir[:] = ou_overrides["theta_dir"]
@@ -269,17 +301,17 @@ def evaluate_scenario(env, policy, wind_level, num_episodes=50, max_steps=1000,
     while episodes_collected < num_episodes:
         # --- OOD pattern: override wind model state using per-env episode time ---
         # Wind speeds scale to the test level's curriculum max speed
-        if ood_pattern == "step":
+        if has_wind and ood_pattern == "step":
             t = ep_step * dt_control
             wind_model.base_speed = torch.where(
                 t < 5.0,
                 torch.zeros_like(t),
                 torch.full_like(t, ood_peak_speed)
             )
-        elif ood_pattern == "periodic":
+        elif has_wind and ood_pattern == "periodic":
             t = ep_step * dt_control
             wind_model.base_speed = ood_mid_speed + ood_amp_speed * torch.sin(2 * math.pi / 4.0 * t)
-        elif ood_pattern == "reversal":
+        elif has_wind and ood_pattern == "reversal":
             # Direction flips 180 deg at t=5s, speed stays constant
             t = ep_step * dt_control
             angle = torch.where(t < 5.0, torch.zeros_like(t),
@@ -312,7 +344,7 @@ def evaluate_scenario(env, policy, wind_level, num_episodes=50, max_steps=1000,
         track_err = torch.sum(
             torch.square(env.commands[:, :2] - env.base_lin_vel[:, :2]), dim=1
         ).sqrt()
-        wind_mag = torch.norm(wind_model.wind_force, dim=1)
+        wind_mag = torch.norm(wind_model.wind_force, dim=1) if has_wind else torch.zeros(num_envs, device=device)
 
         ep_len += 1
         ep_rew += rews
@@ -353,7 +385,7 @@ def evaluate_scenario(env, policy, wind_level, num_episodes=50, max_steps=1000,
                     break
 
             # Re-apply overrides after env resets
-            if fix_direction is not None:
+            if has_wind and fix_direction is not None:
                 for idx in done_ids:
                     i = idx.item()
                     wind_model.base_angle[i] = fix_direction
@@ -361,7 +393,7 @@ def evaluate_scenario(env, policy, wind_level, num_episodes=50, max_steps=1000,
                     wind_model.base_direction[i, 1] = math.sin(fix_direction)
                     wind_model.base_direction[i, 2] = 0.0
 
-            if ou_overrides:
+            if has_wind and ou_overrides:
                 for idx in done_ids:
                     i = idx.item()
                     wind_model.env_ou_theta[i] = ou_overrides["theta"]
@@ -369,7 +401,7 @@ def evaluate_scenario(env, policy, wind_level, num_episodes=50, max_steps=1000,
                     wind_model.env_ou_theta_dir[i] = ou_overrides["theta_dir"]
                     wind_model.env_ou_sigma_dir[i] = ou_overrides["sigma_dir"]
 
-            if mode_overrides and "base_speed_override" in mode_overrides:
+            if has_wind and mode_overrides and "base_speed_override" in mode_overrides:
                 for idx in done_ids:
                     wind_model.base_speed[idx.item()] = mode_overrides["base_speed_override"]
 
@@ -386,10 +418,11 @@ def evaluate_scenario(env, policy, wind_level, num_episodes=50, max_steps=1000,
             break
 
     # Restore
-    env.cfg.wind.upgrade_window = saved_upgrade_window
-    env.cfg.wind.ou_randomize = saved_ou_randomize
-    wind_model.disable_ou = saved_disable_ou
-    wind_model.disable_gusts = saved_disable_gusts
+    if has_wind:
+        env.cfg.wind.upgrade_window = saved_upgrade_window
+        env.cfg.wind.ou_randomize = saved_ou_randomize
+        wind_model.disable_ou = saved_disable_ou
+        wind_model.disable_gusts = saved_disable_gusts
     if saved_resample is not None:
         env._resample_commands = saved_resample
 
@@ -635,6 +668,9 @@ def main():
                              help="Output JSON file path for results")
     eval_parser.add_argument("--seed", type=int, default=None,
                              help="Random seed for reproducibility")
+    eval_parser.add_argument("--model_experiment", type=str, default=None,
+                             help="Override experiment directory for model loading "
+                                  "(e.g. 'g1_wind_baseline' to load baseline model into g1_wind env)")
     eval_args, remaining_argv = eval_parser.parse_known_args()
 
     # Patch sys.argv so get_args() only sees arguments it recognizes
@@ -651,7 +687,16 @@ def main():
             torch.cuda.manual_seed_all(eval_args.seed)
 
     # --- Create environment ---
-    env_cfg, train_cfg = task_registry.get_cfgs(name="g1_wind")
+    # Always use g1_wind env config (with wind) for evaluation so all policies
+    # are tested under identical wind conditions. The --task arg is only used
+    # to determine where to load the model from (experiment_name in train_cfg).
+    task_name = args.task if args.task else "g1_wind"
+    env_cfg, _ = task_registry.get_cfgs(name="g1_wind")
+    _, train_cfg = task_registry.get_cfgs(name=task_name)
+    # Auto-set model_experiment when task differs from g1_wind
+    if not eval_args.model_experiment and task_name != "g1_wind":
+        eval_args.model_experiment = train_cfg.runner.experiment_name
+        print(f"  [NOTE] Loading model from experiment: {eval_args.model_experiment}")
     env_cfg.env.num_envs = min(env_cfg.env.num_envs, 64)
     env_cfg.terrain.num_rows = 5
     env_cfg.terrain.num_cols = 5
@@ -666,13 +711,17 @@ def main():
     env_cfg.env.episode_length_s = eval_args.max_steps * env_cfg.sim.dt * env_cfg.control.decimation
 
     env, _ = task_registry.make_env(name="g1_wind", args=args, env_cfg=env_cfg)
-    print(f"Environment created: {env.num_envs} envs, device={env.device}")
+    has_wind = True  # g1_wind env always has wind
+    print(f"Environment created: g1_wind, {env.num_envs} envs, device={env.device}")
 
     # --- Load policy ---
     load_run = args.load_run if args.load_run else "Mar10_18-22-48_"
     checkpoint = args.checkpoint if args.checkpoint is not None else -1
-    policy, actor_critic = load_policy(env, train_cfg, load_run, checkpoint, args.rl_device)
-    print(f"\nEvaluating policy: {load_run}")
+    model_experiment = eval_args.model_experiment
+    policy, actor_critic = load_policy(env, train_cfg, load_run, checkpoint, args.rl_device,
+                                       model_experiment=model_experiment)
+    print(f"\nEvaluating policy: {load_run}" +
+          (f" (from {model_experiment})" if model_experiment else ""))
 
     # --- Parse test levels ---
     suite = eval_args.suite

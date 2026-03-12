@@ -584,7 +584,7 @@ class G1WindRobot(G1Robot):
         """
         gravity_xy = self.projected_gravity[:, :2]
         raw_penalty = torch.sum(torch.square(gravity_xy), dim=1)
-        if self.cfg.wind.enable:
+        if self.cfg.wind.enable and self.cfg.wind.wind_adaptive_rewards:
             wind_force_mag = torch.norm(self.wind_model.wind_force, dim=1)
             reduction = 1.0 / (1.0 + wind_force_mag / self.cfg.wind.orientation_wind_scale)
             return raw_penalty * reduction
@@ -598,7 +598,7 @@ class G1WindRobot(G1Robot):
         Target lowers from 0.78m to ~0.741m at 150N peak force.
         """
         base_target = self.cfg.rewards.base_height_target
-        if self.cfg.wind.enable:
+        if self.cfg.wind.enable and self.cfg.wind.wind_adaptive_rewards:
             wind_force_mag = torch.norm(self.wind_model.wind_force, dim=1)
             wind_scale = (wind_force_mag / 150.0).clamp(max=1.0)
             target = base_target * (
@@ -791,7 +791,7 @@ class G1WindRobot(G1Robot):
             torch.norm(self.contact_forces[:, self.feet_indices, :3], dim=2)
             > 1.0
         )
-        if self.cfg.wind.enable:
+        if self.cfg.wind.enable and self.cfg.wind.wind_adaptive_rewards:
             wind_force_mag = torch.norm(self.wind_model.wind_force, dim=1)
             wind_scale = (wind_force_mag / 150.0).clamp(max=1.0)
             target = self.cfg.wind.swing_height_base * (
@@ -816,7 +816,7 @@ class G1WindRobot(G1Robot):
         Under strong wind, the stance phase ratio widens (0.55 → 0.75)
         to allow longer double-support periods, improving stability.
         """
-        if self.cfg.wind.enable:
+        if self.cfg.wind.enable and self.cfg.wind.wind_adaptive_rewards:
             wind_force_mag = torch.norm(self.wind_model.wind_force, dim=1)
             stance_ratio = self.cfg.wind.stance_ratio_base + (
                 self.cfg.wind.stance_ratio_wind_increase
