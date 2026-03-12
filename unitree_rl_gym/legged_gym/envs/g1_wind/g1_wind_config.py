@@ -288,3 +288,54 @@ class G1WindBaselineCfgPPO(G1WindRoughCfgPPO):
     class runner(G1WindRoughCfgPPO.runner):
         experiment_name = 'g1_wind_baseline'
         max_iterations = 3000
+
+
+class G1WindNoCurriculumCfg(G1WindRoughCfg):
+    """Exp4: Wind ON but fixed at L3 (medium, 4-8 m/s). No curriculum advancement."""
+
+    class wind(G1WindRoughCfg.wind):
+        curriculum_start_level = 3
+        upgrade_window = 999999     # disable auto-advancement
+        demotion_fraction = 0.0     # disable demotion
+
+
+class G1WindNoCurriculumCfgPPO(G1WindRoughCfgPPO):
+    """PPO config for no-curriculum ablation."""
+
+    class runner(G1WindRoughCfgPPO.runner):
+        experiment_name = 'g1_wind_no_curriculum'
+        max_iterations = 3000
+
+
+class G1WindNoRewardCfg(G1WindRoughCfg):
+    """Exp5: Wind ON + curriculum ON, but wind-specific rewards disabled.
+    Tests whether base rewards alone can learn wind robustness."""
+
+    class rewards(G1WindRoughCfg.rewards):
+        # Disable wind-adaptive tracking sigma
+        tracking_sigma_wind_scale = 0.0
+
+        class scales(G1WindRoughCfg.rewards.scales):
+            # Zero out all wind-specific rewards
+            lean_compensation = 0.0
+            feet_distance = 0.0
+            base_acc = 0.0
+            action_rate2 = 0.0
+
+            # Revert wind-tuned scales to G1 base values
+            orientation = -1.0          # was -0.3 (wind-reduced)
+            ang_vel_xy = -0.05          # was -0.15 (wind-relaxed)
+            dof_acc = -2.5e-7           # was -1.5e-7 (wind-relaxed)
+            contact_no_vel = -0.2       # was -0.1 (wind-relaxed)
+            power = -5e-4              # was -2e-4 (wind-relaxed)
+            alive = 0.5                 # was 1.0 (wind-boosted)
+            feet_swing_height = -20.0   # was -8.0 (wind-reduced)
+            hip_pos = -1.0              # was -0.3 (wind-relaxed)
+
+
+class G1WindNoRewardCfgPPO(G1WindRoughCfgPPO):
+    """PPO config for no-wind-reward ablation."""
+
+    class runner(G1WindRoughCfgPPO.runner):
+        experiment_name = 'g1_wind_no_reward'
+        max_iterations = 3000

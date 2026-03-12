@@ -9,6 +9,8 @@ from legged_gym.envs.g1.g1_config import G1RoughCfg, G1RoughCfgPPO
 from legged_gym.envs.g1.g1_env import G1Robot
 from legged_gym.envs.g1_wind.g1_wind_config import G1WindRoughCfg, G1WindRoughCfgPPO
 from legged_gym.envs.g1_wind.g1_wind_config import G1WindBaselineCfg, G1WindBaselineCfgPPO
+from legged_gym.envs.g1_wind.g1_wind_config import G1WindNoCurriculumCfg, G1WindNoCurriculumCfgPPO
+from legged_gym.envs.g1_wind.g1_wind_config import G1WindNoRewardCfg, G1WindNoRewardCfgPPO
 from legged_gym.envs.g1_wind.g1_wind_env import G1WindRobot
 from .base.legged_robot import LeggedRobot
 
@@ -20,3 +22,5 @@ task_registry.register( "h1_2", H1_2Robot, H1_2RoughCfg(), H1_2RoughCfgPPO())
 task_registry.register( "g1", G1Robot, G1RoughCfg(), G1RoughCfgPPO())
 task_registry.register( "g1_wind", G1WindRobot, G1WindRoughCfg(), G1WindRoughCfgPPO())
 task_registry.register( "g1_wind_baseline", G1WindRobot, G1WindBaselineCfg(), G1WindBaselineCfgPPO())
+task_registry.register( "g1_wind_no_curriculum", G1WindRobot, G1WindNoCurriculumCfg(), G1WindNoCurriculumCfgPPO())
+task_registry.register( "g1_wind_no_reward", G1WindRobot, G1WindNoRewardCfg(), G1WindNoRewardCfgPPO())

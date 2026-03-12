@@ -204,20 +204,24 @@ Cooldown: skip 500 resets after any level change before evaluating again.
 - Ref: Walk These Ways, Rapid Locomotion, ANYmal-DroQ, Booster Gym 2025
 
 ## Experiments Plan
-| ID | Name | Wind | Push | Purpose |
-|----|------|------|------|---------|
-| Exp1 | Baseline | OFF | OFF | Reference |
-| Exp2 | Push-Only | OFF | ON | Traditional robustness |
-| Exp3 | Wind-Trained | ON+Curriculum | OFF | Our method |
-| Exp4 | No-Curriculum | ON (fixed medium) | OFF | Ablation |
-| Exp5 | No-Wind-Reward | ON+Curriculum | OFF | Ablation (base rewards only) |
+| ID | Task Name | Wind | Curriculum | Wind Rewards | Purpose | Status |
+|----|-----------|------|------------|-------------|---------|--------|
+| Exp1 | `g1_wind_baseline` | OFF | — | (inactive) | No-wind baseline | Training |
+| Exp3 | `g1_wind` | ON | ON | ON | Full method | **Done (Run8)** |
+| Exp4 | `g1_wind_no_curriculum` | ON (fixed L3) | OFF | ON | Ablation: curriculum | Pending |
+| Exp5 | `g1_wind_no_reward` | ON | ON | OFF (base G1 values) | Ablation: wind rewards | Pending |
 
 ## Common Commands
 
 ```bash
 # --- Training ---
 python legged_gym/scripts/train.py --task=g1_wind --headless
-python legged_gym/scripts/train.py --task=g1_wind --load_run Mar02_21-49-27_ --checkpoint 3750  # resume
+python legged_gym/scripts/train.py --task=g1_wind --load_run Mar10_18-22-48_ --checkpoint 2900  # resume
+
+# --- Ablation experiments ---
+python legged_gym/scripts/train.py --task=g1_wind_baseline --headless --num_envs 2048 --max_iterations 12000
+python legged_gym/scripts/train.py --task=g1_wind_no_curriculum --headless --num_envs 2048 --max_iterations 12000
+python legged_gym/scripts/train.py --task=g1_wind_no_reward --headless --num_envs 2048 --max_iterations 12000
 
 # --- Play (visual observation with scenario control) ---
 # Basic (defaults: L5, full wind, random commands, 4 envs)
@@ -258,7 +262,8 @@ python legged_gym/g1_wind_test/smoke_test_g1_wind.py
 
 Note: `play.py` requires `--load_run <run_dir>` to locate the model. Without it will raise FileNotFoundError.
 
-Available runs: `Feb28_21-36-56_` (Run4, baseline), `Mar10_18-22-48_` (Run8, best)
+Available runs: `Feb28_21-36-56_` (Run4, old baseline), `Mar10_18-22-48_` (Run8, best)
+Registered tasks: `g1_wind`, `g1_wind_baseline`, `g1_wind_no_curriculum`, `g1_wind_no_reward`
 
 ## Coding Conventions
 - Inherit from existing classes — don't rewrite base code
@@ -267,16 +272,17 @@ Available runs: `Feb28_21-36-56_` (Run4, baseline), `Mar10_18-22-48_` (Run8, bes
 - Config classes use nested class pattern matching legged_gym style
 - Use `gymtorch.unwrap_tensor()` when passing tensors to Isaac Gym C++ API
 
-## Trained Models (logs/g1_wind/)
+## Trained Models
 
 | Run | Directory | Iters | Curriculum | mean_reward | mean_ep_len | Role |
 |-----|-----------|-------|------------|-------------|-------------|------|
-| Run4 | Feb28_21-36-56_ | 1950 | Level 0 (no wind) | 21.25 | 980 | Baseline (Exp1) |
-| Run8 | Mar10_18-22-48_ | 2900 | Level 5 (extreme) | 35.29 | 997 | **Best wind-trained (Exp3)** |
+| Run4 | `logs/g1_wind/Feb28_21-36-56_` | 1950 | Level 0 (no wind) | 21.25 | 980 | Old baseline (73K params, old arch) |
+| Run8 | `logs/g1_wind/Mar10_18-22-48_` | 2900 | Level 5 (extreme) | 35.29 | 997 | **Exp3: Full method (277K params)** |
 
-- Run4: curriculum never advanced, effectively a no-wind baseline. Good tracking (0.84), long episodes.
-- Run8: **best result** — reached max curriculum level 5 (extreme, 10-18 m/s), reward 35.29, near-max episode length (997/1000). Trained with v3.2 wind physics + Phase 4.14 reward/network/PPO config.
+- Run4: old architecture (LSTM-64, MLP [64,32], 73K params). Kept for historical reference only, NOT used as Exp1 baseline (architecture mismatch).
+- Run8: **best result** — LSTM-128, Actor [128,64], Critic [256,128], 277K params. v3.2 wind physics + Phase 4.14 config.
 - Exported LSTM policy: `logs/g1_wind/exported/policies/policy_lstm_1.pt`
+- Ablation models (Exp1/4/5): will be in `logs/g1_wind_baseline/`, `logs/g1_wind_no_curriculum/`, `logs/g1_wind_no_reward/`
 
 ## Caveats
 - `self.phase` only exists after first `step()` call (created in `_post_physics_step_callback`)
@@ -433,11 +439,17 @@ Available runs: `Feb28_21-36-56_` (Run4, baseline), `Mar10_18-22-48_` (Run8, bes
   - Ref: Humanoid-Gym 2024, Walk These Ways 2023, Gait-Conditioned RL
 - [x] Phase 5: Training — Run8 (best, 2900 iters, reached L5, reward 35.29)
 - [ ] Phase 6: Testing, analysis, visualization, report
-  - [x] Quantitative evaluation: eval_wind_robustness.py (Suites A-E, L3/L4/L5)
-    - Run8 full eval: 55 scenarios, 50/55 achieve 100% survival
-    - Worst: D5_default_L5 (96% survival), D2_turbulent_L5 (98%, tracking 0.364)
-    - Suite C (directions): all 100% survival, policy fully direction-invariant
-    - Results: test_result_3.10/full_eval_run8.json
-  - [ ] Supplementary eval: Suite F (command variations) + Suite E3 (direction reversal)
-  - [ ] Visual observation: play.py with scenario control (wind level/angle/mode/commands)
+  - [x] Quantitative evaluation: eval_wind_robustness.py (Suites A-F, L3/L4/L5)
+    - Run8 full eval: 70+ scenarios, all >= 98% survival
+    - Suite A (levels): L0-L5 all 100%, tracking error 0.186→0.254
+    - Suite B (modes): 98-100%, B3_gusts_L5 is lowest (98%)
+    - Suite C (directions): all 100%, policy fully direction-invariant
+    - Suite D (OU extremes): D4_erratic_L5 98%, D2_turbulent_L5 tracking 0.360 (worst)
+    - Suite E (OOD): E1-E3 all 100% at L3-L5, reversal L5 tracking 0.299
+    - Suite F (commands): all 100% except F4_fast_L5 (98%), lateral tracking 0.278
+    - Results: test_result_3.10/
+  - [x] Visual observation: play.py — confirmed upright walking under all wind conditions
+    - No wind: normal gait; L5: body lean + trajectory drift (body-frame tracking maintained)
+    - LSTM warm-up ~2-3s for wind estimation convergence
+  - [ ] Ablation experiments: Exp1 (baseline), Exp4 (no curriculum), Exp5 (no wind rewards)
   - [ ] Report and analysis

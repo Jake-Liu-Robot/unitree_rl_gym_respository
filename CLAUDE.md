@@ -28,5 +28,5 @@ Unitree_rl_gym/                          # Workspace root (git repo)
 ```bash
 cd unitree_rl_gym
 python legged_gym/scripts/train.py --task=g1_wind --headless
-python legged_gym/scripts/play.py --task=g1_wind --load_run Mar02_21-49-27_
+python legged_gym/scripts/play.py --task=g1_wind --load_run Mar10_18-22-48_
 ```
