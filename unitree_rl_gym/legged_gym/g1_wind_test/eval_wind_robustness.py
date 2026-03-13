@@ -135,7 +135,7 @@ def load_policy(env, train_cfg, load_run, checkpoint, device, model_experiment=N
     # only compatible weights (actor weights share the same architecture).
     loaded_dict = torch.load(resume_path)
     saved_state = loaded_dict['model_state_dict']
-    if model_experiment and model_experiment != train_cfg.runner.experiment_name:
+    if model_experiment and model_experiment != "g1_wind":
         model_state = runner.alg.actor_critic.state_dict()
         compatible_state = {}
         skipped = []
