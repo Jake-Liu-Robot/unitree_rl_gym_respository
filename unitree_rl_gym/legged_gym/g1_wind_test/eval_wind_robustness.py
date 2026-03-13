@@ -643,6 +643,7 @@ def save_results_json(all_results, output_path, metadata=None):
         "metadata": metadata or {},
         "results": all_results,
     }
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with open(output_path, 'w') as f:
         json.dump(output, f, indent=2)
     print(f"\nResults saved to: {output_path}")
