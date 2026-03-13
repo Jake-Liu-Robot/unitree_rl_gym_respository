@@ -206,10 +206,11 @@ Cooldown: skip 500 resets after any level change before evaluating again.
 ## Experiments Plan
 | ID | Task Name | Wind | Curriculum | Wind Rewards | Purpose | Status |
 |----|-----------|------|------------|-------------|---------|--------|
-| Exp1 | `g1_wind_baseline` | OFF | — | (inactive) | No-wind baseline | Training |
+| Exp1 | `g1_wind_baseline` | OFF | — | (inactive) | No-wind baseline | **Done** |
+| Exp2 | `g1_wind_push_only` | OFF (push) | ON | ON | Push perturbation only | **Done** |
 | Exp3 | `g1_wind` | ON | ON | ON | Full method | **Done (Run8)** |
-| Exp4 | `g1_wind_no_curriculum` | ON (fixed L3) | OFF | ON | Ablation: curriculum | Pending |
-| Exp5 | `g1_wind_no_reward` | ON | ON | OFF (base G1 values) | Ablation: wind rewards | Pending |
+| Exp4 | `g1_wind_no_curriculum` | ON (fixed L3) | OFF | ON | Ablation: curriculum | **Done** |
+| Exp5 | `g1_wind_no_reward` | ON | ON | OFF (base G1 values) | Ablation: wind rewards | **Done** |
 
 ## Common Commands
 
@@ -262,8 +263,9 @@ python legged_gym/g1_wind_test/smoke_test_g1_wind.py
 
 Note: `play.py` requires `--load_run <run_dir>` to locate the model. Without it will raise FileNotFoundError.
 
-Available runs: `Feb28_21-36-56_` (Run4, old baseline), `Mar10_18-22-48_` (Run8, best)
-Registered tasks: `g1_wind`, `g1_wind_baseline`, `g1_wind_no_curriculum`, `g1_wind_no_reward`
+Available runs: `Feb28_21-36-56_` (Run4, old baseline), `Mar10_18-22-48_` (Run8/Exp3, best)
+Ablation runs: `Mar12_00-14-00_` (Exp1), `Mar12_21-47-52_` (Exp2), `Mar12_21-34-46_` (Exp4), `Mar12_21-34-59_` (Exp5)
+Registered tasks: `g1_wind`, `g1_wind_baseline`, `g1_wind_push_only`, `g1_wind_no_curriculum`, `g1_wind_no_reward`
 
 ## Coding Conventions
 - Inherit from existing classes — don't rewrite base code
@@ -274,15 +276,36 @@ Registered tasks: `g1_wind`, `g1_wind_baseline`, `g1_wind_no_curriculum`, `g1_wi
 
 ## Trained Models
 
-| Run | Directory | Iters | Curriculum | mean_reward | mean_ep_len | Role |
-|-----|-----------|-------|------------|-------------|-------------|------|
-| Run4 | `logs/g1_wind/Feb28_21-36-56_` | 1950 | Level 0 (no wind) | 21.25 | 980 | Old baseline (73K params, old arch) |
-| Run8 | `logs/g1_wind/Mar10_18-22-48_` | 2900 | Level 5 (extreme) | 35.29 | 997 | **Exp3: Full method (277K params)** |
+| Exp | Task | Directory | Iters | Role |
+|-----|------|-----------|-------|------|
+| Exp1 | `g1_wind_baseline` | `logs/g1_wind_baseline/Mar12_00-14-00_` | 9950 | No-wind baseline (277K) |
+| Exp2 | `g1_wind_push_only` | `logs/g1_wind_push_only/Mar12_21-47-52_` | 1450 | Push perturbation only (277K) |
+| **Exp3** | `g1_wind` | `logs/g1_wind/Mar10_18-22-48_` | 2900 | **Full method (277K, best)** |
+| Exp4 | `g1_wind_no_curriculum` | `logs/g1_wind_no_curriculum/Mar12_21-34-46_` | 1500 | Ablation: no curriculum (277K) |
+| Exp5 | `g1_wind_no_reward` | `logs/g1_wind_no_reward/Mar12_21-34-59_` | 2100 | Ablation: no wind rewards (277K) |
+| Run4 | `g1_wind` | `logs/g1_wind/Feb28_21-36-56_` | 1950 | Old arch (73K, historical only) |
 
-- Run4: old architecture (LSTM-64, MLP [64,32], 73K params). Kept for historical reference only, NOT used as Exp1 baseline (architecture mismatch).
-- Run8: **best result** — LSTM-128, Actor [128,64], Critic [256,128], 277K params. v3.2 wind physics + Phase 4.14 config.
+- All Exp1-5 use identical 277K architecture: LSTM-128, Actor [128,64], Critic [256,128].
+- Run8 (Exp3): **best result** — v3.2 wind physics + Phase 4.14 config. Reached curriculum L5.
 - Exported LSTM policy: `logs/g1_wind/exported/policies/policy_lstm_1.pt`
-- Ablation models (Exp1/4/5): will be in `logs/g1_wind_baseline/`, `logs/g1_wind_no_curriculum/`, `logs/g1_wind_no_reward/`
+
+## Evaluation Results Summary (84 scenarios per experiment, Suites A-F at L3/L4/L5)
+
+| Exp | L3 pass | L4 pass | L5 pass | L5 avg surv | L5 trk_err | Fails |
+|-----|---------|---------|---------|-------------|------------|-------|
+| Exp1 (baseline) | 26/26 | 8/26 | 1/26 | 5% | 1.617 | 45/84 |
+| Exp2 (push only) | 26/26 | 26/26 | 11/26 | 81% | 1.180 | 16/84 |
+| **Exp3 (full)** | **26/26** | **26/26** | **26/26** | **100%** | **0.254** | **0/84** |
+| Exp4 (no curriculum) | 26/26 | 26/26 | 9/26 | 48% | 0.910 | 18/84 |
+| Exp5 (no wind reward) | 26/26 | 26/26 | 26/26 | 99% | 0.272 | 0/84 |
+
+Pass = survival >= 90%. Results in `test_results/` (per-experiment JSON).
+
+**Ablation conclusions** (contribution ranking):
+1. Wind model training (Exp1→Exp3): essential, L5 5%→100%
+2. Curriculum learning (Exp4→Exp3): critical, L5 48%→100%
+3. Wind physics vs push (Exp2→Exp3): significant, L5 81%→100%
+4. Wind-specific rewards (Exp5→Exp3): marginal, L5 99%→100%, trk 0.272→0.254
 
 ## Caveats
 - `self.phase` only exists after first `step()` call (created in `_post_physics_step_callback`)
@@ -440,16 +463,21 @@ Registered tasks: `g1_wind`, `g1_wind_baseline`, `g1_wind_no_curriculum`, `g1_wi
 - [x] Phase 5: Training — Run8 (best, 2900 iters, reached L5, reward 35.29)
 - [ ] Phase 6: Testing, analysis, visualization, report
   - [x] Quantitative evaluation: eval_wind_robustness.py (Suites A-F, L3/L4/L5)
-    - Run8 full eval: 70+ scenarios, all >= 98% survival
+    - Run8 full eval: 84 scenarios, all >= 98% survival, 0 failures
     - Suite A (levels): L0-L5 all 100%, tracking error 0.186→0.254
-    - Suite B (modes): 98-100%, B3_gusts_L5 is lowest (98%)
+    - Suite B (modes): 98-100%, B3_gusts_L4 is lowest (98%)
     - Suite C (directions): all 100%, policy fully direction-invariant
-    - Suite D (OU extremes): D4_erratic_L5 98%, D2_turbulent_L5 tracking 0.360 (worst)
-    - Suite E (OOD): E1-E3 all 100% at L3-L5, reversal L5 tracking 0.299
-    - Suite F (commands): all 100% except F4_fast_L5 (98%), lateral tracking 0.278
-    - Results: test_result_3.10/
+    - Suite D (OU extremes): D4_erratic_L5 100% (D2_turbulent_L5 tracking 0.364, worst)
+    - Suite E (OOD): E1-E3 all 98-100% at L3-L5, reversal L5 tracking 0.299
+    - Suite F (commands): all 98-100%, F4_fast_L5 (98%), lateral tracking 0.278
   - [x] Visual observation: play.py — confirmed upright walking under all wind conditions
     - No wind: normal gait; L5: body lean + trajectory drift (body-frame tracking maintained)
     - LSTM warm-up ~2-3s for wind estimation convergence
-  - [ ] Ablation experiments: Exp1 (baseline), Exp4 (no curriculum), Exp5 (no wind rewards)
+  - [x] Ablation experiments — all 5 experiments trained and evaluated (84 scenarios each)
+    - Exp1 (baseline): 45/84 fail, L5 avg survival 5% — validates wind training necessity
+    - Exp2 (push only): 16/84 fail, L5 avg survival 81% — push provides partial robustness
+    - Exp3 (full method): 0/84 fail, L5 avg survival 100% — perfect
+    - Exp4 (no curriculum): 18/84 fail, L5 avg survival 48% — curriculum is critical
+    - Exp5 (no wind reward): 0/84 fail, L5 avg survival 99% — wind rewards marginal
+    - Results: `test_results/exp{1..5}_*/`
   - [ ] Report and analysis
