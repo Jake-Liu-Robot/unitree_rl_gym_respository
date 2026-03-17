@@ -1,0 +1,6 @@
+from legged_gym.envs.g1_wind.g1_wind_config import G1WindRoughCfg, G1WindRoughCfgPPO
+from legged_gym.envs.g1_wind.g1_wind_config import G1WindBaselineCfg, G1WindBaselineCfgPPO
+from legged_gym.envs.g1_wind.g1_wind_config import G1WindPushOnlyCfg, G1WindPushOnlyCfgPPO
+from legged_gym.envs.g1_wind.g1_wind_config import G1WindNoCurriculumCfg, G1WindNoCurriculumCfgPPO
+from legged_gym.envs.g1_wind.g1_wind_config import G1WindNoRewardCfg, G1WindNoRewardCfgPPO
+from legged_gym.envs.g1_wind.g1_wind_env import G1WindRobot
