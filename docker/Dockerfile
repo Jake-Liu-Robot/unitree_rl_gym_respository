@@ -53,12 +53,11 @@ RUN conda install -y \
 COPY IsaacGym_Preview_4_Package /opt/isaacgym
 RUN cd /opt/isaacgym/isaacgym/python && pip install -e . --no-cache-dir
 
-# ── MuJoCo 2.3.7 ─────────────────────────────────────────────
-# Install mujoco pip package (includes binaries, no manual download needed)
-RUN pip install mujoco==2.3.7 --no-cache-dir
+# ── MuJoCo 3.2.3 ─────────────────────────────────────────────
+RUN pip install mujoco==3.2.3 --no-cache-dir
 
-# Install mujoco-py for legacy compatibility (optional but common)
-RUN pip install mujoco-py==2.1.2.14 --no-cache-dir
+# Upgrade numpy before gymnasium (Isaac Gym installs 1.20.0, gymnasium requires >=1.21.0)
+RUN pip install "numpy==1.23.5" --no-cache-dir
 
 # Install gymnasium with MuJoCo extras
 RUN pip install gymnasium[mujoco]==0.29.1 --no-cache-dir
@@ -97,4 +96,9 @@ RUN echo "source /opt/conda/etc/profile.d/conda.sh && conda activate unitree-rl"
 RUN ln -s /opt/conda/envs/unitree-rl/lib/libpython3.8.so.1.0 /usr/lib/libpython3.8.so.1.0 && ldconfig
 
 WORKDIR /workspace
+
+# ── Entrypoint: migrate baked logs to workspace on first start ───
+COPY docker/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+ENTRYPOINT ["/entrypoint.sh"]
 CMD ["/bin/bash"]
