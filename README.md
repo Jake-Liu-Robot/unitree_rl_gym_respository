@@ -36,6 +36,18 @@ Pass = survival ≥ 90% over a 20-second episode. Evaluated across 6 suites (win
 
 ---
 
+### Level Sweep (Suite A — L0 to L5)
+
+<p align="center">
+  <img src="doc/Isaac_gym/suite_a_survival.png" alt="Suite A Survival Rate across Wind Levels" width="80%">
+</p>
+
+<p align="center">
+  <img src="doc/Isaac_gym/suite_a_tracking.png" alt="Suite A Tracking Error across Wind Levels" width="80%">
+</p>
+
+### Ablation Component Contributions
+
 <p align="center">
   <img src="doc/Isaac_gym/ablation_contribution.png" alt="Ablation Component Contributions" width="80%">
 </p>
