@@ -37,19 +37,19 @@ Pass = survival ≥ 90% over a 20-second episode. Evaluated across 6 suites (win
 ---
 
 <p align="center">
-  <img src="doc/isaac_gym/ablation_contribution.png" alt="Ablation Component Contributions" width="80%">
+  <img src="doc/Isaac_gym/ablation_contribution.png" alt="Ablation Component Contributions" width="80%">
 </p>
  
 ### L5 Survival Heatmap — All Suites (26 scenarios)
  
 <p align="center">
-  <img src="doc/isaac_gym/l5_heatmap.png" alt="L5 Survival Heatmap across all test suites" width="70%">
+  <img src="doc/Isaac_gym/l5_heatmap.png" alt="L5 Survival Heatmap across all test suites" width="70%">
 </p>
  
 ### Reward Component Analysis
  
 <p align="center">
-  <img src="doc/isaac_gym/l5_rewards.png" alt="Key Reward Components at L5" width="90%">
+  <img src="doc/Isaac_gym/l5_rewards.png" alt="Key Reward Components at L5" width="90%">
 </p>
 
 ----
