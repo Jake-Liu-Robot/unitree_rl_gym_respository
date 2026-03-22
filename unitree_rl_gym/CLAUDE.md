@@ -332,7 +332,7 @@ Pass = survival >= 90%. L5 trk_err = mean tracking error across all 26 L5 scenar
 ## Sim2Sim (MuJoCo) Results Summary
 
 MuJoCo eval: `--suite all --test_level all` — 84 scenarios per experiment (Suites A-F at L3/L4/L5).
-Results in `test_results/mujoco/test_results/mujoco/` (Docker path artifact).
+Results in `test_results/mujoco/`.
 
 | Exp | L3 pass | L4 pass | L5 pass | L5 avg surv | L5 trk_err | Fails |
 |-----|---------|---------|---------|-------------|------------|-------|

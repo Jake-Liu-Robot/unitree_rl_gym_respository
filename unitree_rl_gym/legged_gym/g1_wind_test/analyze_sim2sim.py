@@ -29,11 +29,11 @@ IG_FILES = {
 }
 
 MJ_FILES = {
-    "Exp1": os.path.join(REPO_ROOT, "test_results", "mujoco", "test_results", "mujoco", "exp1_baseline_mujoco.json"),
-    "Exp2": os.path.join(REPO_ROOT, "test_results", "mujoco", "test_results", "mujoco", "exp2_push_only_mujoco.json"),
-    "Exp3": os.path.join(REPO_ROOT, "test_results", "mujoco", "test_results", "mujoco", "exp3_full_method_mujoco.json"),
-    "Exp4": os.path.join(REPO_ROOT, "test_results", "mujoco", "test_results", "mujoco", "exp4_no_curriculum_mujoco.json"),
-    "Exp5": os.path.join(REPO_ROOT, "test_results", "mujoco", "test_results", "mujoco", "exp5_no_reward_mujoco.json"),
+    "Exp1": os.path.join(REPO_ROOT, "test_results", "mujoco", "exp1_baseline_mujoco.json"),
+    "Exp2": os.path.join(REPO_ROOT, "test_results", "mujoco", "exp2_push_only_mujoco.json"),
+    "Exp3": os.path.join(REPO_ROOT, "test_results", "mujoco", "exp3_full_method_mujoco.json"),
+    "Exp4": os.path.join(REPO_ROOT, "test_results", "mujoco", "exp4_no_curriculum_mujoco.json"),
+    "Exp5": os.path.join(REPO_ROOT, "test_results", "mujoco", "exp5_no_reward_mujoco.json"),
 }
 
 EXP_LABELS = {
