@@ -331,30 +331,40 @@ Pass = survival >= 90%. L5 trk_err = mean tracking error across all 26 L5 scenar
 
 ## Sim2Sim (MuJoCo) Results Summary
 
-MuJoCo eval was run with `--suite all --test_levels 3` (Suites B-F at L3 only; Suite A covers L0-L5).
-32 scenarios per experiment. L5 survival/tracking from Suite A single scenario (A_level5).
+MuJoCo eval: `--suite all --test_level all` — 84 scenarios per experiment (Suites A-F at L3/L4/L5).
+Results in `test_results/mujoco/test_results/mujoco/` (Docker path artifact).
 
-| Exp | L3 B-F pass | Suite A L4 | Suite A L5 | L5 trk_err | Fails |
-|-----|-------------|------------|------------|------------|-------|
-| Exp1 (baseline) | 26/26 | 38% | 4% | 1.566 | 2/32 |
-| Exp2 (push only) | 26/26 | 100% | 70% | 1.261 | 1/32 |
-| **Exp3 (full)** | **26/26** | **100%** | **100%** | **0.205** | **0/32** |
-| Exp4 (no curriculum) | 26/26 | 90% | 36% | 0.852 | 1/32 |
-| Exp5 (no wind reward) | 26/26 | 100% | 100% | 0.184 | 0/32 |
+| Exp | L3 pass | L4 pass | L5 pass | L5 avg surv | L5 trk_err | Fails |
+|-----|---------|---------|---------|-------------|------------|-------|
+| Exp1 (baseline) | 26/26 | 13/26 | 2/26 | 28% | 1.379 | 39/84 |
+| Exp2 (push only) | 26/26 | 26/26 | 13/26 | 81% | 1.272 | 14/84 |
+| **Exp3 (full)** | **26/26** | **26/26** | **26/26** | **100%** | **0.191** | **0/84** |
+| Exp4 (no curriculum) | 26/26 | 16/26 | 7/26 | 54% | 0.817 | 30/84 |
+| Exp5 (no wind reward) | 26/26 | 26/26 | 26/26 | 100% | 0.182 | 0/84 |
 
-Pass = survival >= 90%. Results in `test_results/mujoco/`.
+Pass = survival >= 90%. L5 trk_err = mean tracking error across all 26 L5 scenarios.
 
-**Sim2Sim gap** (Isaac Gym L5 avg surv → MuJoCo Suite A L5 surv):
-- Exp1: 5% → 4% (Δ = −1pp) — **match**
-- Exp2: 81% → 70% (Δ = −11pp) — gap
-- Exp3: 100% → 100% (Δ = 0pp) — **match**
-- Exp4: 48% → 36% (Δ = −12pp) — gap
+**Sim2Sim gap** (Isaac Gym L5 avg surv → MuJoCo L5 avg surv):
+- Exp1: 5% → 28% (Δ = +23pp) — **MuJoCo better** (unexpected; baseline policy generalizes to MuJoCo physics)
+- Exp2: 81% → 81% (Δ = 0pp) — **match**
+- Exp3: 100% → 100% (Δ = 0pp) — **perfect transfer**
+- Exp4: 48% → 54% (Δ = +6pp) — MuJoCo slightly better
 - Exp5: 99% → 100% (Δ = +1pp) — **match**
 
-**Key findings**: Exp3 (full method) transfers perfectly (100% → 100%). Exp1/Exp2/Exp4 show
-consistent degradation direction: policies that struggled in Isaac Gym struggle more in MuJoCo
-(PhysX→MuJoCo transfer amplifies existing weaknesses). Exp5 (no wind reward) also transfers
-perfectly, confirming wind-specific rewards have marginal impact on survival.
+**Key findings**:
+- Exp3/Exp5 transfer perfectly (100% survival in both engines).
+- MuJoCo tracking error is consistently **15-20% lower** than Isaac Gym (action timing fix resolved the previous 2x gap).
+- Exp1 surprising improvement (5%→28%): MuJoCo's smoother contact dynamics may aid the no-wind baseline.
+- Ablation conclusions hold in MuJoCo: curriculum (Exp4) and wind training (Exp1) remain the critical factors.
+
+**Exp3 per-suite tracking error (all 100% survival, MuJoCo)**:
+| Suite | L3 trk | L4 trk | L5 trk |
+|-------|--------|--------|--------|
+| B (modes) | 0.146 | 0.154 | 0.178 |
+| C (directions) | 0.142 | 0.140 | 0.156 |
+| D (OU extremes) | 0.152 | 0.166 | 0.205 |
+| E (OOD) | 0.152 | 0.164 | 0.221 |
+| F (commands) | 0.160 | 0.169 | 0.202 |
 
 ## Caveats
 - `self.phase` only exists after first `step()` call (created in `_post_physics_step_callback`)
@@ -563,12 +573,13 @@ perfectly, confirming wind-specific rewards have marginal impact on survival.
     - Policy paths: logs/<task>/exported/policies/policy_lstm_1.pt (no run timestamp subdir)
     - To export Exp1 policy: python legged_gym/scripts/play.py --task=g1_wind_baseline --load_run Mar12_00-14-00_ --headless
     - Tracking error frame: d.qvel[0:2] is world-frame; rotate via yaw to body-frame before comparing to cmd
-  - Results (32 scenarios per exp, Suites B-F at L3 + Suite A L0-L5):
-    - Exp3 (full method): 100% L5 survival in MuJoCo — perfect transfer from Isaac Gym
+  - Results (84 scenarios per exp, Suites A-F at L3/L4/L5, `--test_level all`):
+    - Exp3 (full method): 100% L5 survival in MuJoCo — perfect transfer; tracking 15-20% lower than Isaac Gym
     - Exp5 (no wind reward): 100% L5 survival — also transfers perfectly
-    - Exp1 (baseline): 4% L5 survival — consistent with Isaac Gym (5%), confirms no-wind policy fails under wind
-    - Exp2 (push only): 70% L5 survival (IG: 81%) — slight degradation, push ≠ wind physics
-    - Exp4 (no curriculum): 36% L5 survival (IG: 48%) — curriculum gap amplified in MuJoCo
+    - Exp1 (baseline): 28% L5 survival (IG: 5%) — unexpected improvement; MuJoCo contact smoother for baseline
+    - Exp2 (push only): 81% L5 survival (IG: 81%) — perfect match
+    - Exp4 (no curriculum): 54% L5 survival (IG: 48%) — MuJoCo slightly better
+    - Overall: ablation conclusions hold in MuJoCo; MuJoCo tracking consistently lower after action timing fix
 
 ## Sim2Sim Gotchas Reference
 | Issue | Detail |
