@@ -121,38 +121,26 @@ def update_cfg_from_args(env_cfg, cfg_train, args):
 
 def get_args():
     custom_parameters = [
-        ## --task参数是指定训练任务的，比如 --task=anymal_c_rough，一般会将任务的配置文件放在envs文件夹下
         {"name": "--task", "type": str, "default": "go2", "help": "Resume training or start testing from a checkpoint. Overrides config file if provided."},
-        ## --resume参数
         {"name": "--resume", "action": "store_true", "default": False,  "help": "Resume training from a checkpoint"},
         {"name": "--experiment_name", "type": str,  "help": "Name of the experiment to run or load. Overrides config file if provided."},
         {"name": "--run_name", "type": str,  "help": "Name of the run. Overrides config file if provided."},
         {"name": "--load_run", "type": str,  "help": "Name of the run to load when resume=True. If -1: will load the last run. Overrides config file if provided."},
-        ## --checkpoint参数是使用哪个训练好的模型，比如训练500次的还是1000次的模型
         {"name": "--checkpoint", "type": int,  "help": "Saved model checkpoint number. If -1: will load the last checkpoint. Overrides config file if provided."},
-        ## --headless参数是在训练过程中是否开启issac gym可视化界面，若纯训练可关闭--headless=ture，否则会影响训练速度
+        
         {"name": "--headless", "action": "store_true", "default": False, "help": "Force display off at all times"},
-        ## --horovod参数是训练是否采用多卡同时训练
         {"name": "--horovod", "action": "store_true", "default": False, "help": "Use horovod for multi-gpu training"},
-        ## --rl_device参数是指定训练的GPU卡
-        {"name": "--rl_device", "type": str, "default": "cuda:0",
-         "help": 'Device used by the RL algorithm, (cpu, gpu, cuda:0, cuda:1 etc..)'},
-        ## --num_envs参数是指定一次训练中有多少个智能体，智能体越多训练效率高，但是对GPU显存的要求也高。
-        {"name": "--num_envs", "type": int,
-         "help": "Number of environments to create. Overrides config file if provided."},
+        {"name": "--rl_device", "type": str, "default": "cuda:0", "help": 'Device used by the RL algorithm, (cpu, gpu, cuda:0, cuda:1 etc..)'},
+        {"name": "--num_envs", "type": int, "help": "Number of environments to create. Overrides config file if provided."},
         {"name": "--seed", "type": int, "help": "Random seed. Overrides config file if provided."},
-        ## --max_iterations参数是指定训练的最多迭代次数
-        {"name": "--max_iterations", "type": int,
-         "help": "Maximum number of training iterations. Overrides config file if provided."},
+        {"name": "--max_iterations", "type": int, "help": "Maximum number of training iterations. Overrides config file if provided."},
     ]
     # parse arguments
-    ## issac gym中解析参数的函数。该函数的作用就是将上述参数导入到issac gym中
     args = gymutil.parse_arguments(
         description="RL Policy",
         custom_parameters=custom_parameters)
 
     # name allignment
-    ## 参数的赋值
     args.sim_device_id = args.compute_device_id
     args.sim_device = args.sim_device_type
     if args.sim_device=='cuda':

@@ -1,0 +1,30 @@
+policy_path: "{LEGGED_GYM_ROOT_DIR}/logs/g1_wind/exported/policies/policy_lstm_1.pt"
+xml_path: "{LEGGED_GYM_ROOT_DIR}/resources/robots/g1_description/scene.xml"
+
+# Total simulation time
+simulation_duration: 60.0
+# Simulation time step
+simulation_dt: 0.002
+# Controller update frequency: simulation_dt * control_decimation = 0.002 * 10 = 0.02s (50 Hz)
+control_decimation: 10
+
+# PD gains — must match g1_wind_config.py
+kps: [100, 100, 100, 150, 40, 40, 100, 100, 100, 150, 40, 40]
+kds: [2, 2, 2, 4, 2, 2, 2, 2, 2, 4, 2, 2]
+
+# Default standing pose — must match g1_wind_config.py
+default_angles: [-0.1,  0.0,  0.0,  0.3, -0.2, 0.0,
+                 -0.1,  0.0,  0.0,  0.3, -0.2, 0.0]
+
+# Observation normalization scales — must match g1_wind_config.py
+ang_vel_scale: 0.25
+dof_pos_scale: 1.0
+dof_vel_scale: 0.05
+action_scale: 0.25
+cmd_scale: [2.0, 2.0, 0.25]
+
+num_actions: 12
+num_obs: 47
+
+# Initial walking command: [vx (m/s), vy (m/s), yaw_rate (rad/s)]
+cmd_init: [0.5, 0.0, 0.0]
