@@ -83,7 +83,7 @@ Pass = survival ≥ 90% over a 20-second episode. Evaluated across 6 suites (win
 
 ```
 Wind_Robust_Walking_for_the_Unitree_G1/
-├── unitree_rl_gym/                      # Main project
+├── g1_wind/                             # Main project
 │   ├── legged_gym/
 │   │   ├── envs/
 │   │   │   ├── g1_wind/                 # Wind environment
@@ -100,7 +100,6 @@ Wind_Robust_Walking_for_the_Unitree_G1/
 │   │       └── play.py                  # Visualization with wind/command control
 │   ├── resources/robots/g1_description/ # G1 URDF models
 │   └── logs/                            # Training outputs & exported policies
-├── IsaacGym_Preview_4_Package/          # NVIDIA Isaac Gym (dependency)
 ├── rsl_rl/                              # PPO implementation (dependency, do not modify)
 ├── unitree_sdk2_python/                 # Unitree SDK2 (robot communication)
 └── docker/                              # Docker environment setup
@@ -176,11 +175,11 @@ cd rsl_rl
 pip install -e .
 
 # Install main project
-cd unitree_rl_gym
+cd g1_wind
 pip install -e .
 ```
 
-All commands below should be run from the `unitree_rl_gym/` directory.
+All commands below should be run from the `g1_wind/` directory.
 
 ---
 
