@@ -5,6 +5,7 @@ import math
 import argparse
 
 import isaacgym
+from isaacgym import gymapi
 from isaacgym.torch_utils import quat_apply
 from legged_gym.envs import *
 from legged_gym.utils import get_args, export_policy_as_jit, task_registry, Logger
@@ -139,6 +140,10 @@ def play(args, play_args):
             wind_model.base_direction[:, 2] = 0.0
             wind_model.effective_direction[:] = wind_model.base_direction[:]
 
+        # Fixed wind speed (overrides random sampling)
+        if play_args.wind_speed is not None:
+            wind_model.base_speed[:] = play_args.wind_speed
+
         obs = env.get_observations()
 
     # ================================================================
@@ -156,6 +161,10 @@ def play(args, play_args):
         # Disable command resampling
         env._orig_resample_commands = env._resample_commands
         env._resample_commands = lambda env_ids: None
+
+        # Set target heading to 0 (+X) if not explicitly specified
+        if "heading_offset" not in fix_commands:
+            env.commands[:, 3] = 0.0  # target heading = face +X
 
         # Apply initial commands
         _apply_fixed_commands(env, fix_commands)
@@ -201,12 +210,33 @@ def play(args, play_args):
     print(f"---------------------\n")
 
     # ================================================================
+    # Video recording setup
+    # ================================================================
+    video_writer = None
+    record_frames = play_args.record is not None
+    record_cam = None
+    if record_frames:
+        import cv2
+        from isaacgym import gymapi
+        rec_fps = play_args.record_fps
+        rec_steps = int(play_args.record_duration / (env.cfg.sim.dt * env.cfg.control.decimation))
+        render_every = max(1, int(1.0 / rec_fps / (env.cfg.sim.dt * env.cfg.control.decimation)))
+        # Create offscreen camera sensor in env 0
+        cam_props = gymapi.CameraProperties()
+        cam_props.width = 1280
+        cam_props.height = 720
+        cam_props.enable_tensors = False
+        record_cam = env.gym.create_camera_sensor(env.envs[0], cam_props)
+        print(f"Created offscreen camera ({cam_props.width}x{cam_props.height})")
+
+    # ================================================================
     # Main loop
     # ================================================================
     dt_control = env.cfg.sim.dt * env.cfg.control.decimation
     ep_step = torch.zeros(env.num_envs, device=env.device)
 
-    for i in range(10 * int(env.max_episode_length)):
+    total_iters = rec_steps if record_frames else 10 * int(env.max_episode_length)
+    for i in range(total_iters):
         # --- OOD pattern: override wind before step ---
         if ood_pattern and has_wind:
             t = ep_step * dt_control
@@ -233,6 +263,29 @@ def play(args, play_args):
         obs, _, rews, dones, infos = env.step(actions.detach())
         ep_step += 1
 
+        # Diagnostic: print yaw and position every 2s
+        if i % 100 == 0:
+            pos = env.root_states[0, :3].cpu().numpy()
+            forward = env.root_states[0, 7:10].cpu().numpy()  # lin vel
+            fwd_vec = torch.tensor([[1, 0, 0]], dtype=torch.float, device=env.device)
+            heading_vec = quat_apply(env.base_quat[0:1], fwd_vec)
+            heading_angle = math.degrees(math.atan2(heading_vec[0, 1].item(), heading_vec[0, 0].item()))
+            cmd2 = env.commands[0, 2].item()
+            target_h = math.degrees(env.commands[0, 3].item())
+            print(f"  t={i*dt_control:.1f}s  yaw={heading_angle:+6.1f}°  target={target_h:+6.1f}°  cmd2={cmd2:+.2f}  pos=[{pos[0]:+.2f},{pos[1]:+.2f}]")
+
+        # Camera tracking: rear-side view (see both lean and forward progress)
+        robot_pos = env.root_states[0, :3].cpu().numpy()
+        cam_offset = np.array([-2.0, -2.0, 1.0])  # behind-right, above
+        cam_pos = robot_pos + cam_offset
+        cam_target = robot_pos + np.array([0, 0, 0.5])  # look at pelvis height
+        if not args.headless:
+            env.set_camera(cam_pos.tolist(), cam_target.tolist())
+        if record_cam is not None:
+            env.gym.set_camera_location(record_cam, env.envs[0],
+                                        gymapi.Vec3(*cam_pos),
+                                        gymapi.Vec3(*cam_target))
+
         # Override commands after step
         if fix_commands is not None:
             _apply_fixed_commands(env, fix_commands)
@@ -256,6 +309,26 @@ def play(args, play_args):
                     wind_model.base_direction[i_env, 1] = math.sin(angle_rad)
                     wind_model.base_direction[i_env, 2] = 0.0
 
+        # Record frame
+        if record_frames and i % render_every == 0:
+            env.gym.fetch_results(env.sim, True)
+            env.gym.step_graphics(env.sim)
+            env.gym.render_all_camera_sensors(env.sim)
+            img = env.gym.get_camera_image(env.sim, env.envs[0], record_cam, gymapi.IMAGE_COLOR)
+            if img is not None:
+                frame = np.frombuffer(img, dtype=np.uint8).reshape(720, 1280, 4)  # RGBA
+                frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGBA2BGR)
+                if video_writer is None:
+                    h, w = frame_bgr.shape[:2]
+                    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                    video_writer = cv2.VideoWriter(play_args.record, fourcc, rec_fps, (w, h))
+                    print(f"Recording {play_args.record_duration}s → {play_args.record} ({w}x{h} @ {rec_fps}fps)")
+                video_writer.write(frame_bgr)
+
+    if video_writer is not None:
+        video_writer.release()
+        print(f"Done! Video saved to: {play_args.record}")
+
 
 def _apply_fixed_commands(env, fix_commands):
     """Override velocity commands."""
@@ -278,6 +351,8 @@ if __name__ == '__main__':
                              help="Wind curriculum level 0-5 (default: max)")
     play_parser.add_argument("--wind_angle", type=float, default=None,
                              help="Fixed wind direction in degrees (default: random)")
+    play_parser.add_argument("--wind_speed", type=float, default=None,
+                             help="Fixed wind speed in m/s (overrides random sampling)")
     play_parser.add_argument("--wind_mode", type=str, default="full",
                              choices=["full", "steady", "turbulent", "gusts"],
                              help="Wind model mode")
@@ -294,7 +369,18 @@ if __name__ == '__main__':
                              help="Number of environments (default: 4)")
     play_parser.add_argument("--model_experiment", type=str, default=None,
                              help="Load model from a different experiment directory (cross-experiment eval)")
+    play_parser.add_argument("--record", type=str, default=None,
+                             help="Record to MP4 file (e.g. --record video.mp4)")
+    play_parser.add_argument("--record_duration", type=float, default=10.0,
+                             help="Recording duration in seconds (default: 10)")
+    play_parser.add_argument("--record_fps", type=int, default=30,
+                             help="Recording FPS (default: 30)")
     play_args, remaining_argv = play_parser.parse_known_args()
+
+    # Recording requires graphics — strip --headless so camera sensor works
+    if play_args.record and '--headless' in remaining_argv:
+        remaining_argv.remove('--headless')
+        print("[record] Ignoring --headless (camera sensor needs graphics device)")
 
     # Patch sys.argv so get_args() only sees its own arguments
     import sys

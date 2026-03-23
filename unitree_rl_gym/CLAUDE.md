@@ -366,6 +366,45 @@ Pass = survival >= 90%. L5 trk_err = mean tracking error across all 26 L5 scenar
 | E (OOD) | 0.152 | 0.164 | 0.221 |
 | F (commands) | 0.160 | 0.169 | 0.202 |
 
+## Known Issue: Gait Asymmetry & Heading Drift
+
+### Observation
+The trained policy (Exp3) exhibits a consistent heading drift of ~18° (rightward) even without wind.
+Under wind, the drift increases proportionally:
+
+| Wind speed | Heading drift | Gait bias component | Wind-induced component |
+|-----------|--------------|--------------------|-----------------------|
+| 0 m/s | -18° | -18° | 0° |
+| 5 m/s | -26° | -18° | -8° |
+| 8 m/s | -32° | -18° | -14° |
+| 15 m/s | -53° | -18° | -35° |
+
+The drift stabilizes at a dynamic equilibrium where policy yaw correction torque = gait-induced + wind-induced yaw torque.
+
+### Root Causes
+1. **No symmetry enforcement**: No reward term or architectural constraint enforces left-right gait symmetry. The `tracking_ang_vel` reward (scale=0.5) is too weak relative to survival (1.0) and velocity tracking (1.0).
+2. **Stochastic training breaks symmetry**: Random weight initialization, random environment resets, and stochastic PPO gradients cause the policy to converge to a slightly asymmetric local optimum.
+3. **LSTM temporal bias**: Sequential processing of observations develops asymmetric hidden state patterns that reinforce directional preference.
+4. **Observation ordering**: Left leg joints always precede right leg joints in the observation vector, creating a subtle network bias.
+5. **Asymmetric per-body wind forces during walking**: At any instant, left and right legs are at different positions/velocities, causing asymmetric wind forces that produce net yaw torque. This amplifies the baseline gait drift under wind.
+
+### Impact on Evaluation
+- **Quantitative evaluation (84 scenarios)**: Not affected. The eval script uses `cmd[2]=0` (no heading command), and the survival/tracking metrics do not penalize heading drift. All results (100% survival for Exp3) remain valid.
+- **Visual demos**: The robot walks at an angle to the world +X axis. This is a cosmetic issue — the policy successfully maintains stability, forward velocity, and wind resistance.
+
+### Potential Solutions (Future Work)
+1. **Mirror loss**: Enforce `π(mirror(obs)) = mirror(π(obs))` during training to guarantee symmetric gaits.
+2. **Data augmentation**: Mirror observations and actions (swap left/right) and add to training batch.
+3. **Symmetric network architecture**: Share weights between left and right leg processing pathways.
+4. **Stronger heading reward**: Increase `tracking_ang_vel` scale or add explicit heading penalty.
+5. **Gait symmetry reward**: Add `contact_symmetry` or stride-length symmetry term.
+
+### MuJoCo Deployment Bug Fix (2026-03-23)
+During demo video development, a critical bug was found in `deploy/deploy_mujoco/deploy_mujoco_lstm.py`:
+- **xfrc_applied layout was swapped**: force written to torque slots and vice versa (`[0:3]=torque, [3:6]=force` instead of correct `[0:3]=force, [3:6]=torque`). This caused the robot to fall at wind speeds ≥11 m/s despite the eval script achieving 100% survival at L5.
+- **Simulation loop order**: Policy inference occurred before physics substeps (should be after, matching training and eval). Wind forces were applied once per control step instead of every physics substep.
+- Both bugs are now fixed. The deployment script matches the eval script's loop structure.
+
 ## Caveats
 - `self.phase` only exists after first `step()` call (created in `_post_physics_step_callback`)
 - `net_contact_force_tensor` is unreliable on GPU + triangle mesh terrain

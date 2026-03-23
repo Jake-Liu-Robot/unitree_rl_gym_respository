@@ -6,15 +6,19 @@ Features:
   - 3-layer wind model (base + OU turbulence + gusts) applied as body forces
   - Wind direction arrow visualized in the MuJoCo viewer
   - Console status printout every 2 seconds
+  - --record mode: offscreen rendering to MP4 video (no viewer window needed)
 
 Usage:
   python deploy/deploy_mujoco/deploy_mujoco_lstm.py g1_wind.yaml
   python deploy/deploy_mujoco/deploy_mujoco_lstm.py g1_wind.yaml --wind_level 5
   python deploy/deploy_mujoco/deploy_mujoco_lstm.py g1_wind.yaml --wind_level 0  # no wind
+  python deploy/deploy_mujoco/deploy_mujoco_lstm.py g1_wind.yaml --wind_level 5 --record video.mp4
+  python deploy/deploy_mujoco/deploy_mujoco_lstm.py g1_wind.yaml --wind_level 5 --record video.mp4 --record_duration 10
 """
 
 import time
 import argparse
+import os
 
 import numpy as np
 import torch
@@ -50,6 +54,8 @@ class WindModel:
         self.dt    = dt
         self.level = max(0, min(10, level))
         self.wind_velocity = np.zeros(3)
+        self.disable_ou    = False
+        self.disable_gusts = False
         self.reset()
 
     def set_level(self, level):
@@ -81,19 +87,19 @@ class WindModel:
         dt = self.dt
 
         # Layer 2: OU speed fluctuation
-        self.ou_speed += (- self.ou_theta * self.ou_speed * dt
-                          + self.ou_sigma * np.sqrt(dt) * np.random.randn())
+        if not self.disable_ou:
+            self.ou_speed += (- self.ou_theta * self.ou_speed * dt
+                              + self.ou_sigma * np.sqrt(dt) * np.random.randn())
+            self.ou_angle += (- self.ou_theta_dir * self.ou_angle * dt
+                              + self.ou_sigma_dir * np.sqrt(dt) * np.random.randn())
         eff_speed = float(np.clip(self.base_speed + self.ou_speed,
                                   0.0, self.SPEED_CLAMPS[self.level]))
 
-        # Layer 2: OU directional drift
-        self.ou_angle += (- self.ou_theta_dir * self.ou_angle * dt
-                          + self.ou_sigma_dir * np.sqrt(dt) * np.random.randn())
         angle    = self.base_angle + self.ou_angle
         base_vel = eff_speed * np.array([np.cos(angle), np.sin(angle), 0.0])
 
         # Layer 3: Gust events
-        if not self.gust_active and np.random.random() < 0.1 * dt:
+        if not self.disable_gusts and not self.gust_active and np.random.random() < 0.1 * dt:
             self.gust_active   = True
             self.gust_elapsed  = 0.0
             self.gust_speed    = np.random.uniform(2.0, 6.0)
@@ -205,8 +211,8 @@ def apply_wind_forces(m, d, wind_vel, level):
     for body_id, F_world, cop_pos, body_pos in raw_forces:
         F = F_world * scale
         torque = np.cross(cop_pos - body_pos, F)
-        d.xfrc_applied[body_id, :3] += torque   # torque (world frame)
-        d.xfrc_applied[body_id, 3:6] += F        # force  (world frame)
+        d.xfrc_applied[body_id, 0:3] += F        # force  (world frame)
+        d.xfrc_applied[body_id, 3:6] += torque   # torque (world frame)
 
     return total_raw * scale
 
@@ -285,7 +291,31 @@ if __name__ == "__main__":
                         help="Config filename inside deploy/deploy_mujoco/configs/")
     parser.add_argument("--wind_level", type=int, default=3,
                         help="Wind curriculum level 0-5 (default: 3)")
+    parser.add_argument("--record", type=str, default=None,
+                        help="Record to MP4 file (offscreen, no viewer window)")
+    parser.add_argument("--record_duration", type=float, default=10.0,
+                        help="Recording duration in seconds (default: 10)")
+    parser.add_argument("--record_fps", type=int, default=30,
+                        help="Recording FPS (default: 30)")
+    parser.add_argument("--width", type=int, default=1280,
+                        help="Video width (default: 1280)")
+    parser.add_argument("--height", type=int, default=720,
+                        help="Video height (default: 720)")
+    parser.add_argument("--seed", type=int, default=None,
+                        help="Random seed for reproducible wind (default: None)")
+    parser.add_argument("--wind_mode", type=str, default="full",
+                        choices=["full", "steady", "turbulent", "gusts"],
+                        help="Wind model mode (default: full)")
+    parser.add_argument("--wind_angle", type=float, default=None,
+                        help="Fixed wind direction in degrees (default: random)")
+    parser.add_argument("--wind_speed", type=float, default=None,
+                        help="Fixed wind speed in m/s (overrides random sampling)")
     args = parser.parse_args()
+
+    # ── Set random seed ─────────────────────────────────────────────────────
+    if args.seed is not None:
+        np.random.seed(args.seed)
+        torch.manual_seed(args.seed)
 
     # ── Load config ──────────────────────────────────────────────────────────
     cfg_path = f"{LEGGED_GYM_ROOT_DIR}/deploy/deploy_mujoco/configs/{args.config_file}"
@@ -329,83 +359,156 @@ if __name__ == "__main__":
     wind_model = WindModel(level=args.wind_level, dt=control_dt)
     wind_vel   = np.zeros(3)
 
+    # Apply wind mode
+    if args.wind_mode == "steady":
+        wind_model.disable_ou = True
+        wind_model.disable_gusts = True
+    elif args.wind_mode == "turbulent":
+        wind_model.disable_ou = False
+        wind_model.disable_gusts = True
+    elif args.wind_mode == "gusts":
+        wind_model.disable_ou = True
+        wind_model.disable_gusts = False
+    # "full": both enabled (default)
+
+    # Apply fixed wind angle
+    if args.wind_angle is not None:
+        angle_rad = np.radians(args.wind_angle)
+        wind_model.base_angle = angle_rad
+
+    # Apply fixed wind speed
+    if args.wind_speed is not None:
+        wind_model.base_speed = args.wind_speed
+
     print("\n=== G1 Wind-Robust Walking — MuJoCo Deployment ===")
     print(f"  Policy     : {policy_path}")
     print(f"  Wind level : {args.wind_level}  "
           f"({wind_model.SPEED_RANGES[args.wind_level]} m/s)")
+    print(f"  Wind speed : {wind_model.base_speed:.1f} m/s"
+          f"{' (fixed)' if args.wind_speed else ' (random)'}")
+    print(f"  Wind mode  : {args.wind_mode}")
+    print(f"  Wind angle : {args.wind_angle if args.wind_angle is not None else 'random'}°")
     print(f"  Command    : vx={cmd[0]:.1f}  vy={cmd[1]:.1f}  yaw={cmd[2]:.1f}")
     print("==================================================\n")
 
-    # ── Simulation loop ──────────────────────────────────────────────────────
-    with mujoco.viewer.launch_passive(m, d) as viewer:
-        viewer.opt.label = mujoco.mjtLabel.mjLABEL_NONE                        # suppress body/geom name labels
-        viewer.opt.flags[mujoco.mjtVisFlag.mjVIS_CONTACTFORCE] = False          # suppress contact force arrows
-        viewer.opt.flags[mujoco.mjtVisFlag.mjVIS_CONTACTPOINT] = False          # suppress contact point dots
-        start = time.time()
+    # ── Shared simulation step function ────────────────────────────────────
+    step_counter = 0  # total physics steps
 
-        while viewer.is_running() and time.time() - start < sim_duration:
-            step_start = time.time()
+    def sim_control_step():
+        """Run one control step matching eval script: substeps first, then obs+inference."""
+        global action, target_dof_pos, wind_vel, obs, step_counter
 
-            # ── Control step (every ctrl_decimation physics steps) ──────────
-            if counter % ctrl_decimation == 0:
+        # --- Phase 1: Run physics substeps (PD + wind each substep) ---
+        for _sub in range(ctrl_decimation):
+            tau = pd_control(target_dof_pos, d.qpos[7:], kps,
+                             np.zeros_like(kds), d.qvel[6:], kds)
+            d.ctrl[:] = tau
 
-                # Build observation
-                qj      = (d.qpos[7:] - default_angles) * dof_pos_scale
-                dqj     = d.qvel[6:] * dof_vel_scale
-                omega   = d.qvel[3:6] * ang_vel_scale
-                gravity = get_gravity_orientation(d.qpos[3:7])
+            wind_vel = wind_model.step()
+            wind_force_mag = apply_wind_forces(m, d, wind_vel, wind_model.level)
 
-                t_sim     = counter * sim_dt
-                phase     = (t_sim % 0.8) / 0.8
-                sin_phase = np.sin(2 * np.pi * phase)
-                cos_phase = np.cos(2 * np.pi * phase)
+            mujoco.mj_step(m, d)
+            step_counter += 1
 
-                # Yaw correction: steer back toward target heading (0 = facing +X)
-                quat = d.qpos[3:7]  # MuJoCo quaternion [w, x, y, z]
-                siny = 2.0 * (quat[0]*quat[3] + quat[1]*quat[2])
-                cosy = 1.0 - 2.0 * (quat[2]**2 + quat[3]**2)
-                yaw  = np.arctan2(siny, cosy)
-                yaw_err = np.arctan2(np.sin(-yaw), np.cos(-yaw))  # error to target_yaw=0
-                cmd[2] = float(np.clip(yaw_err * 2.0, -1.0, 1.0))
+        # --- Phase 2: Read state and infer policy (after substeps) ---
+        qj      = (d.qpos[7:] - default_angles) * dof_pos_scale
+        dqj     = d.qvel[6:] * dof_vel_scale
+        omega   = d.qvel[3:6] * ang_vel_scale
+        gravity = get_gravity_orientation(d.qpos[3:7])
 
-                obs[:3]                              = omega
-                obs[3:6]                             = gravity
-                obs[6:9]                             = cmd * cmd_scale
-                obs[9:9 + num_actions]               = qj
-                obs[9 + num_actions:9 + 2*num_actions]   = dqj
-                obs[9 + 2*num_actions:9 + 3*num_actions] = action
-                obs[9 + 3*num_actions:9 + 3*num_actions + 2] = [sin_phase, cos_phase]
+        t_sim     = step_counter * sim_dt
+        phase     = (t_sim % 0.8) / 0.8
+        sin_phase = np.sin(2 * np.pi * phase)
+        cos_phase = np.cos(2 * np.pi * phase)
 
-                # LSTM policy inference
-                obs_tensor     = torch.from_numpy(obs).unsqueeze(0)
-                action         = policy(obs_tensor).detach().numpy().squeeze()
-                target_dof_pos = action * action_scale + default_angles
+        # Yaw command: cmd[2]=0 (no turning command)
+        # Matches eval script behavior — avoids sustained large yaw commands
+        # that the policy can't execute under wind
+        quat = d.qpos[3:7]
+        siny = 2.0 * (quat[0]*quat[3] + quat[1]*quat[2])
+        cosy = 1.0 - 2.0 * (quat[2]**2 + quat[3]**2)
+        yaw  = np.arctan2(siny, cosy)
 
-                # Step wind model and apply forces for this control cycle
-                wind_vel   = wind_model.step()
-                wind_force = apply_wind_forces(m, d, wind_vel, wind_model.level)
+        obs[:3]                              = omega
+        obs[3:6]                             = gravity
+        obs[6:9]                             = cmd * cmd_scale
+        obs[9:9 + num_actions]               = qj
+        obs[9 + num_actions:9 + 2*num_actions]   = dqj
+        obs[9 + 2*num_actions:9 + 3*num_actions] = action
+        obs[9 + 3*num_actions:9 + 3*num_actions + 2] = [sin_phase, cos_phase]
 
-                # Update wind arrow in viewer
+        obs_tensor     = torch.from_numpy(obs).unsqueeze(0)
+        action         = policy(obs_tensor).detach().numpy().squeeze()
+        target_dof_pos = action * action_scale + default_angles
+
+        ctrl_step = step_counter // ctrl_decimation
+        if ctrl_step % 100 == 0:
+            speed = float(np.linalg.norm(wind_vel[:2]))
+            pos = d.qpos[:3]
+            print(f"t={t_sim:5.1f}s  |  wind={speed:4.1f} m/s  "
+                  f"force={wind_force_mag:5.1f} N  "
+                  f"yaw={np.degrees(yaw):6.1f}°  "
+                  f"pos=[{pos[0]:+.2f},{pos[1]:+.2f}]  "
+                  f"cmd=[{cmd[0]:.1f}, {cmd[1]:.1f}, {cmd[2]:.2f}]")
+        return t_sim
+
+    # ── Record mode: offscreen rendering to MP4 ────────────────────────────
+    if args.record:
+        import cv2
+
+        rec_duration = args.record_duration
+        rec_fps      = args.record_fps
+        width, height = args.width, args.height
+        frame_interval = sim_dt * ctrl_decimation  # 0.02s per control step
+        render_every   = max(1, int(1.0 / rec_fps / frame_interval))  # control steps per frame
+
+        renderer = mujoco.Renderer(m, height=height, width=width)
+
+        # Camera that tracks the robot
+        cam = mujoco.MjvCamera()
+        cam.type = mujoco.mjtCamera.mjCAMERA_TRACKING
+        cam.trackbodyid = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, "pelvis")
+        cam.distance = 3.0       # distance from robot
+        cam.azimuth = 150        # rear-side view (see both lean and forward progress)
+        cam.elevation = -20      # slightly above
+        cam.lookat[:] = [0, 0, 0.8]  # offset: look at pelvis height
+
+        out_path = args.record
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        video_writer = cv2.VideoWriter(out_path, fourcc, rec_fps, (width, height))
+
+        total_ctrl_steps = int(rec_duration / control_dt)
+        print(f"Recording {rec_duration}s → {out_path} ({width}x{height} @ {rec_fps}fps) ...")
+
+        for ctrl_count in range(total_ctrl_steps):
+            sim_control_step()  # runs all substeps + policy inference
+            # Render frame at target FPS
+            if ctrl_count % render_every == 0:
+                renderer.update_scene(d, camera=cam)
+                frame = renderer.render()
+                frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                video_writer.write(frame_bgr)
+
+        video_writer.release()
+        renderer.close()
+        print(f"Done! Video saved to: {out_path}")
+
+    # ── Interactive viewer mode ────────────────────────────────────────────
+    else:
+        with mujoco.viewer.launch_passive(m, d) as viewer:
+            viewer.opt.label = mujoco.mjtLabel.mjLABEL_NONE
+            viewer.opt.flags[mujoco.mjtVisFlag.mjVIS_CONTACTFORCE] = False
+            viewer.opt.flags[mujoco.mjtVisFlag.mjVIS_CONTACTPOINT] = False
+            start = time.time()
+
+            while viewer.is_running() and time.time() - start < sim_duration:
+                step_start = time.time()
+
+                sim_control_step()
                 draw_wind_arrow(viewer, wind_vel, wind_model.level)
 
-                # Console status every 2 s
-                ctrl_step = counter // ctrl_decimation
-                if ctrl_step % 100 == 0:
-                    speed = float(np.linalg.norm(wind_vel[:2]))
-                    print(f"t={t_sim:5.1f}s  |  wind={speed:4.1f} m/s  "
-                          f"force={wind_force:5.1f} N  level={wind_model.level}  "
-                          f"cmd=[{cmd[0]:.1f}, {cmd[1]:.1f}, {cmd[2]:.1f}]")
+                viewer.sync()
 
-            # ── PD control → physics step ───────────────────────────────────
-            tau      = pd_control(target_dof_pos, d.qpos[7:], kps,
-                                  np.zeros_like(kds),    d.qvel[6:], kds)
-            d.ctrl[:] = tau
-            mujoco.mj_step(m, d)
-            counter  += 1
-
-            viewer.sync()
-
-            # Real-time pacing
-            elapsed = time.time() - step_start
-            if sim_dt - elapsed > 0:
-                time.sleep(sim_dt - elapsed)
+                elapsed = time.time() - step_start
+                if control_dt - elapsed > 0:
+                    time.sleep(control_dt - elapsed)
