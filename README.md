@@ -100,8 +100,9 @@ Wind_Robust_Walking_for_the_Unitree_G1/
 │   │       └── play.py                  # Visualization with wind/command control
 │   ├── resources/robots/g1_description/ # G1 URDF models
 │   └── logs/                            # Training outputs & exported policies
-├── rsl_rl/                              # PPO implementation (dependency, do not modify)
-├── unitree_sdk2_python/                 # Unitree SDK2 (robot communication)
+├── IsaacGym_Preview_4_Package/          # [download manually] NVIDIA Isaac Gym Preview 4
+├── rsl_rl/                              # [download manually] PPO implementation (dependency)
+├── unitree_sdk2_python/                 # [download manually] Unitree SDK2 (robot communication)
 └── docker/                              # Docker environment setup
 ```
 
