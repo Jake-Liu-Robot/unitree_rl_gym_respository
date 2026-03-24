@@ -66,19 +66,21 @@ Pass = survival ≥ 90% over a 20-second episode. Evaluated across 6 suites (win
 
 ### Demo Videos (L5 Extreme Wind)
 
-**Isaac Gym — Exp3 (Full Method) vs Exp2 (Push Only) at L5:**
+**Isaac Gym — Exp3 (Full Method) at L5:**
 
 <p align="center">
-  <video src="doc/demo_videos/gym_exp3_L5.mp4" width="45%" controls></video>
-  <video src="doc/demo_videos/gym_exp2_L5.mp4" width="45%" controls></video>
+  <img src="doc/demo_videos/gym_exp3_L5.gif" alt="Isaac Gym Exp3 Full Method L5" width="45%">
+  <img src="doc/demo_videos/gym_exp2_L5.gif" alt="Isaac Gym Exp2 Push Only L5" width="45%">
 </p>
+<p align="center"><em>Left: Exp3 Full Method &nbsp;&nbsp;|&nbsp;&nbsp; Right: Exp2 Push Only</em></p>
 
 **MuJoCo Sim2Sim Transfer — Exp3 vs Exp2 at L5:**
 
 <p align="center">
-  <video src="doc/demo_videos/mujoco_exp3_L5.mp4" width="45%" controls></video>
-  <video src="doc/demo_videos/mujoco_exp2_L5.mp4" width="45%" controls></video>
+  <img src="doc/demo_videos/mujoco_exp3_L5.gif" alt="MuJoCo Exp3 Full Method L5" width="45%">
+  <img src="doc/demo_videos/mujoco_exp2_L5.gif" alt="MuJoCo Exp2 Push Only L5" width="45%">
 </p>
+<p align="center"><em>Left: Exp3 Full Method &nbsp;&nbsp;|&nbsp;&nbsp; Right: Exp2 Push Only</em></p>
 
 ----
 
