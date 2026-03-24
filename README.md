@@ -20,7 +20,7 @@ Most humanoid locomotion policies are trained in calm simulation environments an
 
 ### Demo Videos (L5 Extreme Wind)
 
-**Isaac Gym — Exp3 (Full Method) at L5:**
+**Isaac Gym — Exp3 vs Exp2 at L5:**
 
 <p align="center">
   <img src="doc/demo_videos/gym_exp3_L5.gif" alt="Isaac Gym Exp3 Full Method L5" width="45%">
