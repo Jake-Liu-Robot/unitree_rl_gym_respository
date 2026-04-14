@@ -221,48 +221,143 @@ def apply_wind_forces(m, d, wind_vel, level):
 # Wind arrow visualization
 # ──────────────────────────────────────────────────────────────────────────────
 
-# Arrow colour per wind level: blue → cyan → green → yellow → orange → red → purple → white
-_LEVEL_RGBA = [
-    [0.4, 0.4, 1.0, 0.9],   # L0  blue
-    [0.0, 0.8, 1.0, 0.9],   # L1  cyan
-    [0.0, 1.0, 0.4, 0.9],   # L2  green
-    [1.0, 1.0, 0.0, 0.9],   # L3  yellow
-    [1.0, 0.5, 0.0, 0.9],   # L4  orange
-    [1.0, 0.1, 0.1, 0.9],   # L5  red
-    [0.8, 0.0, 0.2, 0.9],   # L6  dark red
-    [0.6, 0.0, 0.6, 0.9],   # L7  purple
-    [0.8, 0.0, 1.0, 0.9],   # L8  violet
-    [1.0, 0.0, 0.8, 0.9],   # L9  magenta
-    [1.0, 1.0, 1.0, 0.9],   # L10 white
-]
+# Arrow params — keep in sync with g1_wind_env.py _draw_wind_arrows()
+_ARROW_SCALE = 1.0 / 10.0     # 1m per 10N (Isaac Gym uses 1/15 due to higher forces)
+_MIN_SHAFT = 0.35              # minimum arrow length (m)
 
-# Arrow drawn at an elevated position behind the robot
-_ARROW_ORIGIN = np.array([-1.5, 0.0, 1.0], dtype=np.float64)
-_ARROW_MIN_LEN = 0.3    # always at least this long so it's visible at low speeds
-_ARROW_MAX_LEN = 1.5    # cap so it doesn't extend too far at high speeds
-_ARROW_WIDTH   = 0.06   # shaft thickness
+# Per-body force arrow: yellow (matches Isaac Gym [1.0, 0.9, 0.0])
+_BODY_FORCE_RGBA = np.array([1.0, 0.9, 0.0, 0.9], dtype=np.float32)
+_BODY_ARROW_WIDTH = 0.015
+
+# Wind field indicator arrow: white shaft (matches Isaac Gym [1.0, 1.0, 1.0])
+_WIND_FIELD_RGBA = np.array([1.0, 1.0, 1.0, 0.9], dtype=np.float32)
+_WIND_FIELD_WIDTH = 0.015
 
 
-def draw_wind_arrow(viewer, wind_vel, level):
-    """Draw a wind-direction arrow in a fixed corner of the scene (thread-safe)."""
-    speed = float(np.linalg.norm(wind_vel))
+def _init_wind_body_ids(m):
+    """Precompute body IDs for wind visualization (call once after model load)."""
+    ids = []
+    for name in _WIND_BODIES:
+        ids.append(mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, name))
+    pelvis_id = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, "pelvis")
+    return ids, pelvis_id
 
+
+def draw_wind_arrows(viewer, d, wind_vel, wind_body_ids, pelvis_id):
+    """Draw per-body force arrows at CoP + horizontal row of wind direction arrows.
+
+    Matches Isaac Gym visualization:
+      - Per-body arrows: yellow, at CoP position, showing actual clamped force
+      - Wind field row: 5 white arrows upwind of robot at pelvis height
+
+    All data is read outside the lock, only geom writes happen inside.
+    """
+    arrow_scale = _ARROW_SCALE
+
+    # ── Prepare arrow data outside lock (avoid MuJoCo calls inside lock) ──
+    arrows = []  # list of (origin, tip, rgba, width)
+
+    # Per-body force arrows
+    for body_id, cop_z in zip(wind_body_ids, _COP_OFFSETS):
+        F = d.xfrc_applied[body_id, 0:3].copy()
+        F_mag = float(np.linalg.norm(F))
+        if F_mag < 0.3:
+            continue
+        body_pos = d.xpos[body_id].copy()
+        cop_pos = body_pos + cop_z * _quat_z_axis(d.xquat[body_id])
+        F_dir = F / (F_mag + 1e-8)
+        shaft_len = max(F_mag * arrow_scale, _MIN_SHAFT)
+        tip = cop_pos + F_dir * shaft_len
+        arrows.append((cop_pos.copy(), tip.copy(), _BODY_FORCE_RGBA, _BODY_ARROW_WIDTH))
+
+    # Wind field: horizontal row of 5 arrows upwind of robot
+    w_speed = float(np.linalg.norm(wind_vel[:2]))
+    if w_speed > 0.5:
+        w_dir = wind_vel / (float(np.linalg.norm(wind_vel)) + 1e-8)
+        w_dir_h = wind_vel[:2] / (w_speed + 1e-8)
+        perp_h = np.array([-w_dir_h[1], w_dir_h[0]])
+
+        pelvis_pos = d.xpos[pelvis_id].copy()
+        center_xy = pelvis_pos[:2] - w_dir_h * 2.0
+        z = pelvis_pos[2]
+        shaft_len = w_speed * 0.12
+
+        for j in range(5):
+            offset = (j - 2) * 0.4
+            origin = np.array([
+                center_xy[0] + perp_h[0] * offset,
+                center_xy[1] + perp_h[1] * offset,
+                z
+            ])
+            tip = origin + w_dir * shaft_len
+            arrows.append((origin.copy(), tip.copy(), _WIND_FIELD_RGBA, _WIND_FIELD_WIDTH))
+
+    # ── Write geoms inside lock (minimal work) ──
     with viewer.lock():
-        viewer.user_scn.ngeom = 0
-        if speed < 0.01:
-            return
+        n = min(len(arrows), viewer.user_scn.maxgeom)
+        for i in range(n):
+            origin, tip, rgba, width = arrows[i]
+            geom = viewer.user_scn.geoms[i]
+            mujoco.mjv_connector(geom, mujoco.mjtGeom.mjGEOM_ARROW,
+                                 width, origin, tip)
+            geom.rgba[:] = rgba
+        viewer.user_scn.ngeom = n
 
-        wind_dir  = wind_vel / speed
-        # Scale length with speed but enforce min/max so it's always readable
-        arrow_len = float(np.clip(speed / 5.0 * _ARROW_MAX_LEN,
-                                  _ARROW_MIN_LEN, _ARROW_MAX_LEN))
-        arrow_end = _ARROW_ORIGIN + wind_dir * arrow_len
 
-        geom = viewer.user_scn.geoms[0]
+def _add_wind_arrows_to_scene(scene, d, wind_vel, wind_body_ids, pelvis_id):
+    """Add wind arrows directly to an MjvScene (for offscreen recording).
+
+    Same arrows as draw_wind_arrows but writes into the scene's geom array
+    so they appear in renderer.render() output.
+    """
+    arrow_scale = _ARROW_SCALE
+
+    # Per-body force arrows
+    for body_id, cop_z in zip(wind_body_ids, _COP_OFFSETS):
+        F = d.xfrc_applied[body_id, 0:3].copy()
+        F_mag = float(np.linalg.norm(F))
+        if F_mag < 0.3 or scene.ngeom >= scene.maxgeom:
+            continue
+        body_pos = d.xpos[body_id].copy()
+        cop_pos = body_pos + cop_z * _quat_z_axis(d.xquat[body_id])
+        F_dir = F / (F_mag + 1e-8)
+        shaft_len = max(F_mag * arrow_scale, _MIN_SHAFT)
+        tip = cop_pos + F_dir * shaft_len
+
+        geom = scene.geoms[scene.ngeom]
         mujoco.mjv_connector(geom, mujoco.mjtGeom.mjGEOM_ARROW,
-                             _ARROW_WIDTH, _ARROW_ORIGIN, arrow_end)
-        geom.rgba[:] = _LEVEL_RGBA[level]
-        viewer.user_scn.ngeom = 1
+                             _BODY_ARROW_WIDTH, cop_pos, tip)
+        geom.rgba[:] = _BODY_FORCE_RGBA
+        scene.ngeom += 1
+
+    # Wind field: horizontal row of 5 arrows
+    w_speed = float(np.linalg.norm(wind_vel[:2]))
+    if w_speed > 0.5:
+        w_dir = wind_vel / (float(np.linalg.norm(wind_vel)) + 1e-8)
+        w_dir_h = wind_vel[:2] / (w_speed + 1e-8)
+        perp_h = np.array([-w_dir_h[1], w_dir_h[0]])
+
+        pelvis_pos = d.xpos[pelvis_id].copy()
+        center_xy = pelvis_pos[:2] - w_dir_h * 2.0
+        z = pelvis_pos[2]
+        shaft_len = w_speed * 0.12
+
+        for j in range(5):
+            if scene.ngeom >= scene.maxgeom:
+                break
+            offset = (j - 2) * 0.4
+            origin = np.array([
+                center_xy[0] + perp_h[0] * offset,
+                center_xy[1] + perp_h[1] * offset,
+                z
+            ])
+            tip = origin + w_dir * shaft_len
+
+            geom = scene.geoms[scene.ngeom]
+            mujoco.mjv_connector(geom, mujoco.mjtGeom.mjGEOM_ARROW,
+                                 _WIND_FIELD_WIDTH, origin, tip)
+            geom.rgba[:] = _WIND_FIELD_RGBA
+            scene.ngeom += 1
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -310,6 +405,8 @@ if __name__ == "__main__":
                         help="Fixed wind direction in degrees (default: random)")
     parser.add_argument("--wind_speed", type=float, default=None,
                         help="Fixed wind speed in m/s (overrides random sampling)")
+    parser.add_argument("--cmd_vx", type=float, default=None,
+                        help="Override forward velocity command (default: from yaml)")
     args = parser.parse_args()
 
     # ── Set random seed ─────────────────────────────────────────────────────
@@ -338,6 +435,8 @@ if __name__ == "__main__":
     num_actions      = cfg["num_actions"]
     num_obs          = cfg["num_obs"]
     cmd              = np.array(cfg["cmd_init"],       dtype=np.float32)
+    if args.cmd_vx is not None:
+        cmd[0] = args.cmd_vx
 
     # ── Init buffers ─────────────────────────────────────────────────────────
     action         = np.zeros(num_actions, dtype=np.float32)
@@ -350,8 +449,8 @@ if __name__ == "__main__":
     d = mujoco.MjData(m)
     m.opt.timestep = sim_dt
 
-    # ── Load LSTM policy ─────────────────────────────────────────────────────
-    policy = torch.jit.load(policy_path)
+    # ── Load LSTM policy (CPU to avoid GPU thread conflict with MuJoCo viewer) ──
+    policy = torch.jit.load(policy_path, map_location='cpu')
     policy.reset_memory()
 
     # ── Wind model ───────────────────────────────────────────────────────────
@@ -421,13 +520,17 @@ if __name__ == "__main__":
         sin_phase = np.sin(2 * np.pi * phase)
         cos_phase = np.cos(2 * np.pi * phase)
 
-        # Yaw command: cmd[2]=0 (no turning command)
-        # Matches eval script behavior — avoids sustained large yaw commands
-        # that the policy can't execute under wind
+        # Heading controller (matches Isaac Gym legged_robot.py _compute_commands)
+        # Computes yaw rate command to steer robot toward target heading (0 = +X)
         quat = d.qpos[3:7]
         siny = 2.0 * (quat[0]*quat[3] + quat[1]*quat[2])
         cosy = 1.0 - 2.0 * (quat[2]**2 + quat[3]**2)
         yaw  = np.arctan2(siny, cosy)
+        target_heading = 0.0  # face +X
+        heading_error = target_heading - yaw
+        # Wrap to [-pi, pi]
+        heading_error = (heading_error + np.pi) % (2 * np.pi) - np.pi
+        cmd[2] = np.clip(0.5 * heading_error, -1.0, 1.0)
 
         obs[:3]                              = omega
         obs[3:6]                             = gravity
@@ -464,14 +567,15 @@ if __name__ == "__main__":
 
         renderer = mujoco.Renderer(m, height=height, width=width)
 
-        # Camera that tracks the robot
+        # Camera matching Isaac Gym play.py: world-frame offset [-2,-2,1]
+        # Use FREE camera with lookat updated each frame to track pelvis
         cam = mujoco.MjvCamera()
-        cam.type = mujoco.mjtCamera.mjCAMERA_TRACKING
-        cam.trackbodyid = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, "pelvis")
-        cam.distance = 3.0       # distance from robot
-        cam.azimuth = 150        # rear-side view (see both lean and forward progress)
-        cam.elevation = -20      # slightly above
-        cam.lookat[:] = [0, 0, 0.8]  # offset: look at pelvis height
+        cam.type = mujoco.mjtCamera.mjCAMERA_FREE
+        cam.distance = 2.9
+        cam.azimuth = 225
+        cam.elevation = -15
+        cam.lookat[:] = [0, 0, 0.5]
+        _pelvis_body_id = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, "pelvis")
 
         out_path = args.record
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
@@ -480,11 +584,18 @@ if __name__ == "__main__":
         total_ctrl_steps = int(rec_duration / control_dt)
         print(f"Recording {rec_duration}s → {out_path} ({width}x{height} @ {rec_fps}fps) ...")
 
+        rec_body_ids, rec_pelvis_id = _init_wind_body_ids(m)
+
         for ctrl_count in range(total_ctrl_steps):
             sim_control_step()  # runs all substeps + policy inference
             # Render frame at target FPS
             if ctrl_count % render_every == 0:
+                # Track pelvis position (FREE camera doesn't auto-track)
+                cam.lookat[:] = d.xpos[_pelvis_body_id]
+                cam.lookat[2] = 0.5
                 renderer.update_scene(d, camera=cam)
+                _add_wind_arrows_to_scene(
+                    renderer.scene, d, wind_vel, rec_body_ids, rec_pelvis_id)
                 frame = renderer.render()
                 frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
                 video_writer.write(frame_bgr)
@@ -495,6 +606,8 @@ if __name__ == "__main__":
 
     # ── Interactive viewer mode ────────────────────────────────────────────
     else:
+        wind_body_ids, pelvis_viz_id = _init_wind_body_ids(m)
+
         with mujoco.viewer.launch_passive(m, d) as viewer:
             viewer.opt.label = mujoco.mjtLabel.mjLABEL_NONE
             viewer.opt.flags[mujoco.mjtVisFlag.mjVIS_CONTACTFORCE] = False
@@ -505,7 +618,7 @@ if __name__ == "__main__":
                 step_start = time.time()
 
                 sim_control_step()
-                draw_wind_arrow(viewer, wind_vel, wind_model.level)
+                draw_wind_arrows(viewer, d, wind_vel, wind_body_ids, pelvis_viz_id)
 
                 viewer.sync()
 

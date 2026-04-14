@@ -217,7 +217,6 @@ def play(args, play_args):
     record_cam = None
     if record_frames:
         import cv2
-        from isaacgym import gymapi
         rec_fps = play_args.record_fps
         rec_steps = int(play_args.record_duration / (env.cfg.sim.dt * env.cfg.control.decimation))
         render_every = max(1, int(1.0 / rec_fps / (env.cfg.sim.dt * env.cfg.control.decimation)))
@@ -228,6 +227,15 @@ def play(args, play_args):
         cam_props.enable_tensors = False
         record_cam = env.gym.create_camera_sensor(env.envs[0], cam_props)
         print(f"Created offscreen camera ({cam_props.width}x{cam_props.height})")
+
+    # ================================================================
+    # Camera follow toggle (press F to toggle, handled in env.render)
+    # ================================================================
+    if not args.headless and env.viewer:
+        env.gym.subscribe_viewer_keyboard_event(
+            env.viewer, gymapi.KEY_F, "toggle_cam_follow")
+        env.cam_follow = False
+        print("  [Tip] Press F to toggle camera follow (default: free look)")
 
     # ================================================================
     # Main loop
@@ -274,12 +282,12 @@ def play(args, play_args):
             target_h = math.degrees(env.commands[0, 3].item())
             print(f"  t={i*dt_control:.1f}s  yaw={heading_angle:+6.1f}°  target={target_h:+6.1f}°  cmd2={cmd2:+.2f}  pos=[{pos[0]:+.2f},{pos[1]:+.2f}]")
 
-        # Camera tracking: rear-side view (see both lean and forward progress)
+        # Camera tracking: rear-side view (only when cam_follow is on, press F to toggle)
         robot_pos = env.root_states[0, :3].cpu().numpy()
         cam_offset = np.array([-2.0, -2.0, 1.0])  # behind-right, above
         cam_pos = robot_pos + cam_offset
         cam_target = robot_pos + np.array([0, 0, 0.5])  # look at pelvis height
-        if not args.headless:
+        if not args.headless and getattr(env, 'cam_follow', False):
             env.set_camera(cam_pos.tolist(), cam_target.tolist())
         if record_cam is not None:
             env.gym.set_camera_location(record_cam, env.envs[0],
@@ -318,6 +326,11 @@ def play(args, play_args):
             if img is not None:
                 frame = np.frombuffer(img, dtype=np.uint8).reshape(720, 1280, 4)  # RGBA
                 frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGBA2BGR)
+
+                # Overlay wind arrows on recorded frame
+                if has_wind and hasattr(env, '_viz_per_body_force'):
+                    _overlay_wind_arrows(env, record_cam, frame_bgr)
+
                 if video_writer is None:
                     h, w = frame_bgr.shape[:2]
                     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
@@ -328,6 +341,88 @@ def play(args, play_args):
     if video_writer is not None:
         video_writer.release()
         print(f"Done! Video saved to: {play_args.record}")
+
+
+def _project_3d_to_2d(point_3d, view_matrix, proj_matrix, width, height):
+    """Project a 3D world point to 2D pixel coordinates using Isaac Gym camera matrices."""
+    # view_matrix and proj_matrix are 4x4 numpy arrays from Isaac Gym
+    p = np.array([point_3d[0], point_3d[1], point_3d[2], 1.0])
+    # World → camera
+    p_cam = view_matrix @ p
+    # Camera → clip
+    p_clip = proj_matrix @ p_cam
+    if abs(p_clip[3]) < 1e-6:
+        return None
+    # Clip → NDC
+    ndc = p_clip[:3] / p_clip[3]
+    # NDC → pixel (Isaac Gym: x right, y down in image)
+    px = int((ndc[0] * 0.5 + 0.5) * width)
+    py = int((1.0 - (ndc[1] * 0.5 + 0.5)) * height)
+    # Behind camera check
+    if p_clip[2] < 0:
+        return None
+    if px < -200 or px > width + 200 or py < -200 or py > height + 200:
+        return None
+    return (px, py)
+
+
+def _overlay_wind_arrows(env, cam_handle, frame_bgr):
+    """Draw wind force arrows on a recorded frame using OpenCV."""
+    import cv2
+
+    gym = env.gym
+    sim = env.sim
+    width, height = frame_bgr.shape[1], frame_bgr.shape[0]
+
+    # Get camera matrices
+    view_mat = np.array(gym.get_camera_view_matrix(sim, env.envs[0], cam_handle)).reshape(4, 4)
+    proj_mat = np.array(gym.get_camera_proj_matrix(sim, env.envs[0], cam_handle)).reshape(4, 4)
+
+    arrow_scale = 1.0 / 15.0
+    min_shaft = 0.35
+
+    # Per-body force arrows (env 0 only for recording)
+    per_body_force = env._viz_per_body_force[0].cpu().numpy()  # [5, 3]
+    cop_positions = env._viz_cop_positions[0].cpu().numpy()     # [5, 3]
+
+    for b in range(per_body_force.shape[0]):
+        f = per_body_force[b]
+        mag = np.linalg.norm(f)
+        if mag < 0.3:
+            continue
+        origin = cop_positions[b]
+        f_dir = f / (mag + 1e-8)
+        shaft_len = max(mag * arrow_scale, min_shaft)
+        tip = origin + f_dir * shaft_len
+
+        p1 = _project_3d_to_2d(origin, view_mat, proj_mat, width, height)
+        p2 = _project_3d_to_2d(tip, view_mat, proj_mat, width, height)
+        if p1 and p2:
+            cv2.arrowedLine(frame_bgr, p1, p2, (0, 230, 255), 2, tipLength=0.25)  # yellow (BGR)
+
+    # Wind field arrows
+    if hasattr(env, 'wind_model'):
+        wind_vel = env.wind_model.wind_velocity[0].cpu().numpy()
+        w_speed = np.linalg.norm(wind_vel[:2])
+        if w_speed > 0.5:
+            w_dir = wind_vel / (np.linalg.norm(wind_vel) + 1e-8)
+            w_dir_h = wind_vel[:2] / (w_speed + 1e-8)
+            perp_h = np.array([-w_dir_h[1], w_dir_h[0]])
+
+            pelvis_pos = env.rigid_body_states_view[0, env.torso_body_idx, 0:3].cpu().numpy()
+            center_xy = pelvis_pos[:2] - w_dir_h * 2.0
+            z = pelvis_pos[2]
+            shaft_len = w_speed * 0.12
+
+            for j in range(5):
+                offset = (j - 2) * 0.4
+                origin = np.array([center_xy[0] + perp_h[0] * offset,
+                                   center_xy[1] + perp_h[1] * offset, z])
+                tip = origin + w_dir * shaft_len
+                p1 = _project_3d_to_2d(origin, view_mat, proj_mat, width, height)
+                p2 = _project_3d_to_2d(tip, view_mat, proj_mat, width, height)
+                if p1 and p2:
+                    cv2.arrowedLine(frame_bgr, p1, p2, (255, 255, 255), 2, tipLength=0.25)  # white
 
 
 def _apply_fixed_commands(env, fix_commands):

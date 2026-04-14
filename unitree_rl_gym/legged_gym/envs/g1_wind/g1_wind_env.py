@@ -193,6 +193,168 @@ class G1WindRobot(G1Robot):
         self._buf_last_actions[:] = self.last_actions
         super()._post_physics_step_callback()
 
+    def render(self, sync_frame_time=True):
+        """Override render to draw wind arrows and handle camera follow toggle."""
+        if self.viewer:
+            # Process F-key toggle before base render consumes the event queue
+            for evt in self.gym.query_viewer_action_events(self.viewer):
+                if evt.action == "toggle_cam_follow" and evt.value > 0:
+                    self.cam_follow = not getattr(self, 'cam_follow', True)
+                    print(f"  Camera follow: {'ON' if self.cam_follow else 'OFF (free look)'}")
+                elif evt.action == "QUIT" and evt.value > 0:
+                    import sys; sys.exit()
+                elif evt.action == "toggle_viewer_sync" and evt.value > 0:
+                    self.enable_viewer_sync = not self.enable_viewer_sync
+
+            if self.cfg.wind.enable:
+                self.gym.clear_lines(self.viewer)
+                self._draw_wind_arrows()
+
+        # Call base render but it won't see our consumed events — that's fine
+        # since we already handled QUIT and toggle_viewer_sync above
+        super().render(sync_frame_time)
+
+    def _draw_wind_arrows(self):
+        """Draw per-body wind force arrows at each force application point.
+
+        Each of the 5 wind-receiving bodies (pelvis, 2 thighs, 2 shins) gets
+        its own arrow showing the clamped force vector actually applied via
+        apply_rigid_body_force_at_pos_tensors. Direction is per-body v_rel.
+
+        Arrow length: 1 meter per 50N. Color: yellow shaft + orange arrowhead.
+        """
+        if not hasattr(self, '_viz_per_body_force'):
+            return
+
+        per_body_force = self._viz_per_body_force  # [num_envs, num_wind_bodies, 3]
+        cop_positions = self._viz_cop_positions     # [num_envs, num_wind_bodies, 3]
+
+        # Arrow params (keep in sync with deploy_mujoco_lstm.py)
+        arrow_scale = 1.0 / 15.0   # 1m per 15N (Isaac Gym forces slightly larger than MuJoCo)
+        min_shaft = 0.35            # minimum arrow length (m)
+
+        # Batch transfer to CPU
+        pb_force_cpu = per_body_force.cpu().numpy()    # [num_envs, 5, 3]
+        cop_pos_cpu = cop_positions.cpu().numpy()      # [num_envs, 5, 3]
+
+        num_wind_bodies = pb_force_cpu.shape[1]
+
+        for i in range(self.num_envs):
+            env_handle = self.envs[i]
+
+            for b in range(num_wind_bodies):
+                f = pb_force_cpu[i, b]           # [3]
+                mag = np.linalg.norm(f)
+                if mag < 0.3:
+                    continue
+
+                origin = cop_pos_cpu[i, b].copy()
+                f_dir = f / (mag + 1e-8)
+                shaft_len = max(mag * arrow_scale, min_shaft)
+                tip = origin + f_dir * shaft_len
+
+                # Arrowhead
+                head_len = min(0.12, shaft_len * 0.3)
+                perp = np.array([-f_dir[1], f_dir[0], 0.0])
+                perp_n = np.linalg.norm(perp)
+                if perp_n < 1e-6:
+                    perp = np.array([1.0, 0.0, 0.0])
+                else:
+                    perp /= perp_n
+                back = -f_dir * head_len
+                wing1 = tip + back + perp * head_len * 0.5
+                wing2 = tip + back - perp * head_len * 0.5
+
+                self._add_line(origin, tip, [1.0, 0.9, 0.0], env_handle, thickness=4)
+                self._add_line(tip, wing1, [1.0, 0.5, 0.0], env_handle, thickness=4)
+                self._add_line(tip, wing2, [1.0, 0.5, 0.0], env_handle, thickness=4)
+
+        # --- Wind field indicator: horizontal row of arrows upwind of robot ---
+        wind_vel = self.wind_model.wind_velocity  # [num_envs, 3]
+        wind_vel_cpu = wind_vel.cpu().numpy()
+        pelvis_pos_cpu = self.rigid_body_states_view[
+            :, self.torso_body_idx, 0:3
+        ].cpu().numpy()
+
+        for i in range(self.num_envs):
+            wv = wind_vel_cpu[i]
+            w_speed = np.linalg.norm(wv[:2])  # horizontal speed
+            if w_speed < 0.5:
+                continue
+
+            w_dir = wv / (np.linalg.norm(wv) + 1e-8)
+            w_dir_h = wv[:2] / (w_speed + 1e-8)
+            env_handle = self.envs[i]
+
+            # Perpendicular direction in horizontal plane (for spreading arrows)
+            perp_h = np.array([-w_dir_h[1], w_dir_h[0]])
+
+            # Row center: 2m upwind of robot, at pelvis height
+            center_xy = pelvis_pos_cpu[i, :2] - w_dir_h * 2.0
+            z = pelvis_pos_cpu[i, 2]
+
+            shaft_len = w_speed * 0.12
+            head_len = min(0.20, shaft_len * 0.3)
+            perp3 = np.array([perp_h[0], perp_h[1], 0.0])
+
+            # 5 arrows spread horizontally, 0.4m spacing
+            for j in range(5):
+                offset = (j - 2) * 0.4  # -0.8, -0.4, 0, +0.4, +0.8
+                origin = np.array([
+                    center_xy[0] + perp_h[0] * offset,
+                    center_xy[1] + perp_h[1] * offset,
+                    z
+                ])
+                tip = origin + w_dir * shaft_len
+
+                back = -w_dir * head_len
+                wing1 = tip + back + perp3 * head_len * 0.5
+                wing2 = tip + back - perp3 * head_len * 0.5
+
+                self._add_line(origin, tip, [1.0, 1.0, 1.0], env_handle, thickness=5)
+                self._add_line(tip, wing1, [0.0, 1.0, 1.0], env_handle, thickness=5)
+                self._add_line(tip, wing2, [0.0, 1.0, 1.0], env_handle, thickness=5)
+
+    def _add_line(self, p1, p2, color, env_handle, thickness=3):
+        """Draw a thick line by duplicating with small perpendicular offsets.
+
+        Args:
+            thickness: number of parallel lines (1=thin, 3=medium, 5=bold).
+        """
+        p1 = np.asarray(p1, dtype=np.float64)
+        p2 = np.asarray(p2, dtype=np.float64)
+        direction = p2 - p1
+        length = np.linalg.norm(direction)
+        if length < 1e-8:
+            return
+
+        # Two perpendicular offset axes
+        d = direction / length
+        # perp1: horizontal perpendicular
+        perp1 = np.array([-d[1], d[0], 0.0])
+        if np.linalg.norm(perp1) < 1e-6:
+            perp1 = np.array([1.0, 0.0, 0.0])
+        perp1 /= np.linalg.norm(perp1)
+        # perp2: vertical perpendicular
+        perp2 = np.cross(d, perp1)
+
+        gap = 0.006  # meters between parallel lines
+        offsets = []
+        half = thickness // 2
+        for i in range(-half, half + 1):
+            for j in range(-half, half + 1):
+                if abs(i) + abs(j) <= half:  # diamond pattern
+                    offsets.append(perp1 * i * gap + perp2 * j * gap)
+
+        n = len(offsets)
+        verts = np.empty((n, 2), dtype=gymapi.Vec3.dtype)
+        colors = np.empty(n, dtype=gymapi.Vec3.dtype)
+        for k, off in enumerate(offsets):
+            verts[k][0] = tuple(p1 + off)
+            verts[k][1] = tuple(p2 + off)
+            colors[k] = tuple(color)
+        self.gym.add_lines(self.viewer, env_handle, n, verts, colors)
+
     def step(self, actions):
         """Override step to apply action delay, wind forces, and DR torques."""
         clip_actions = self.cfg.normalization.clip_actions
@@ -334,6 +496,10 @@ class G1WindRobot(G1Robot):
         cop_positions = body_pos + world_offsets.reshape(
             self.num_envs, num_wind_bodies, 3
         )
+
+        # Cache per-body data for visualization (used by _draw_wind_arrows)
+        self._viz_per_body_force = per_body_force  # [num_envs, num_wind_bodies, 3]
+        self._viz_cop_positions = cop_positions     # [num_envs, num_wind_bodies, 3]
 
         # --- Scatter into tensors and apply ---
         self.wind_force_tensor[:] = 0.0
