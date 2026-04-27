@@ -51,14 +51,24 @@ This is an **emergent wind-load reduction strategy**: by turning ~53°, the robo
 
 ```bash
 cd unitree_rl_gym
+```
 
-# Isaac Gym
+### Isaac Gym
+
+```bash
 python legged_gym/scripts/play.py --task=g1_wind --load_run Mar10_18-22-48_ --wind_level 5 --wind_mode full --wind_angle 180 --wind_speed 15 --fix_vx 0.5 --fix_vy 0 --num_envs 1 --seed 42 --record gym_exp3_L5.mp4 --record_duration 10
+```
 
+```bash
 python legged_gym/scripts/play.py --task=g1_wind --model_experiment g1_wind_push_only --load_run Mar12_21-47-52_ --wind_level 5 --wind_mode full --wind_angle 180 --wind_speed 15 --fix_vx 0.5 --fix_vy 0 --num_envs 1 --seed 42 --record gym_exp2_L5.mp4 --record_duration 10
+```
 
-# MuJoCo
+### MuJoCo
+
+```bash
 MUJOCO_GL=egl python deploy/deploy_mujoco/deploy_mujoco_lstm.py g1_wind.yaml --wind_level 5 --wind_mode full --wind_angle 180 --wind_speed 15 --seed 42 --record mujoco_exp3_L5.mp4 --record_duration 10
+```
 
+```bash
 MUJOCO_GL=egl python deploy/deploy_mujoco/deploy_mujoco_lstm.py g1_wind_push_only.yaml --wind_level 5 --wind_mode full --wind_angle 180 --wind_speed 15 --seed 42 --record mujoco_exp2_L5.mp4 --record_duration 10
 ```
