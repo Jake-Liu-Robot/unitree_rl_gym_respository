@@ -50,25 +50,24 @@ Force bodies: pelvis (55%), left/right thigh (12% each), left/right shin (8% eac
 
 ```bash
 cd unitree_rl_gym
+```
 
-# Isaac Gym — Exp3 headwind
-python legged_gym/scripts/play.py --task=g1_wind --load_run Mar10_18-22-48_ \
-  --wind_level 5 --wind_mode steady --wind_angle 180 --fix_vx 0.6 --num_envs 1 \
-  --record demo_videos/wind_arrow_viz/isaac_gym/exp3_headwind_L5.mp4 --record_duration 15
+### Isaac Gym
 
-# Isaac Gym — Exp2 headwind
-python legged_gym/scripts/play.py --task=g1_wind --load_run Mar12_21-47-52_ \
-  --model_experiment g1_wind_push_only \
-  --wind_level 5 --wind_mode steady --wind_angle 180 --fix_vx 0.6 --num_envs 1 \
-  --record demo_videos/wind_arrow_viz/isaac_gym/exp2_headwind_L5.mp4 --record_duration 15
+```bash
+python legged_gym/scripts/play.py --task=g1_wind --load_run Mar10_18-22-48_ --wind_level 5 --wind_mode steady --wind_angle 180 --fix_vx 0.6 --num_envs 1 --record demo_videos/wind_arrow_viz/isaac_gym/exp3_headwind_L5.mp4 --record_duration 15
+```
 
-# MuJoCo — Exp3 headwind
-python deploy/deploy_mujoco/deploy_mujoco_lstm.py g1_wind.yaml \
-  --wind_level 5 --wind_mode steady --wind_angle 180 --cmd_vx 0.6 --seed 42 \
-  --record demo_videos/wind_arrow_viz/mujoco/exp3_headwind_L5.mp4 --record_duration 15
+```bash
+python legged_gym/scripts/play.py --task=g1_wind --load_run Mar12_21-47-52_ --model_experiment g1_wind_push_only --wind_level 5 --wind_mode steady --wind_angle 180 --fix_vx 0.6 --num_envs 1 --record demo_videos/wind_arrow_viz/isaac_gym/exp2_headwind_L5.mp4 --record_duration 15
+```
 
-# MuJoCo — Exp2 headwind
-python deploy/deploy_mujoco/deploy_mujoco_lstm.py g1_wind_push_only.yaml \
-  --wind_level 5 --wind_mode steady --wind_angle 180 --cmd_vx 0.6 --seed 42 \
-  --record demo_videos/wind_arrow_viz/mujoco/exp2_headwind_L5.mp4 --record_duration 15
+### MuJoCo
+
+```bash
+python deploy/deploy_mujoco/deploy_mujoco_lstm.py g1_wind.yaml --wind_level 5 --wind_mode steady --wind_angle 180 --cmd_vx 0.6 --seed 42 --record demo_videos/wind_arrow_viz/mujoco/exp3_headwind_L5.mp4 --record_duration 15
+```
+
+```bash
+python deploy/deploy_mujoco/deploy_mujoco_lstm.py g1_wind_push_only.yaml --wind_level 5 --wind_mode steady --wind_angle 180 --cmd_vx 0.6 --seed 42 --record demo_videos/wind_arrow_viz/mujoco/exp2_headwind_L5.mp4 --record_duration 15
 ```
